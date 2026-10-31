@@ -1,0 +1,36 @@
+# Keil MDK build output
+MDK-ARM/gripper/
+
+# Keil user-specific and IDE-generated files
+MDK-ARM/*.uvguix.*
+MDK-ARM/*.uvgui.*
+MDK-ARM/.vscode/*.log
+MDK-ARM/.vscode/*.lock
+MDK-ARM/build_check.log
+
+# Compiler and linker outputs
+*.o
+*.d
+*.dep
+*.axf
+*.elf
+*.hex
+*.bin
+*.map
+*.lnp
+*.sct
+*.iex
+*.crf
+*.lst
+*.sym
+*.su
+*.build_log.htm
+
+# Logs and temporary files
+*.log
+*.lock
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+desktop.ini
