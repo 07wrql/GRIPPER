@@ -22,7 +22,10 @@
 #include "gpio.h"
 
 /* USER CODE BEGIN 0 */
-
+/*
+ * PF0/PF1 的电气配置由 CubeMX 生成。
+ * 驱动层的引脚映射分别位于 relay_driver.h 和 photogate_driver.h。
+ */
 /* USER CODE END 0 */
 
 /*----------------------------------------------------------------------------*/
@@ -52,20 +55,20 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOH_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(RELAY_IN_GPIO_Port, RELAY_IN_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_0, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : RELAY_IN_Pin */
-  GPIO_InitStruct.Pin = RELAY_IN_Pin;
+  /*Configure GPIO pin : PF0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(RELAY_IN_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PHOTO_GATE_IN_Pin */
-  GPIO_InitStruct.Pin = PHOTO_GATE_IN_Pin;
+  /*Configure GPIO pin : PF1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(PHOTO_GATE_IN_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
 }
 

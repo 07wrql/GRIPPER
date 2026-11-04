@@ -57,10 +57,6 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define RELAY_IN_Pin GPIO_PIN_0
-#define RELAY_IN_GPIO_Port GPIOF
-#define PHOTO_GATE_IN_Pin GPIO_PIN_1
-#define PHOTO_GATE_IN_GPIO_Port GPIOF
 
 /* USER CODE BEGIN Private defines */
 

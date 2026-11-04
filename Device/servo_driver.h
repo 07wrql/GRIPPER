@@ -1,32 +1,72 @@
+/**
+  ******************************************************************************
+  * @file    servo_driver.h
+  * @brief   TIM2 通道 2 舵机 PWM 驱动
+  ******************************************************************************
+  * 硬件映射：
+  *   PA1 -> TIM2_CH2
+  *
+  * CubeMX 中的 TIM2 配置：
+  *   Prescaler = 83      -> 定时器计数频率 1 MHz，每格 1 us
+  *   Period    = 19999   -> PWM 周期 20000 us，即 20 ms
+  *   PWM Mode  = PWM1
+  *
+  * 本驱动固定使用 TIM2 的通道 2，不需要在调用时重复传入定时器句柄和通道。
+  ******************************************************************************
+  */
+
 #ifndef SERVO_DRIVER_H
 #define SERVO_DRIVER_H
 
-#include "stm32f4xx_hal.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "tim.h"
+
+/* 舵机 PWM 硬件映射，修改定时器或通道时只需要调整下面两个宏。 */
+#define SERVO_TIM_HANDLE          (&htim2)        /* TIM2 定时器句柄 */
+#define SERVO_TIM_CHANNEL         TIM_CHANNEL_2   /* TIM2 通道 2，对应 PA1 */
 
 /* 舵机商品参数给出的脉宽范围和角度范围。 */
-#define SERVO_MIN_PULSE_US  500U
-#define SERVO_MAX_PULSE_US  2500U
-#define SERVO_MAX_ANGLE_DEG 180
+#define SERVO_MIN_PULSE_US        500U            /* 0 度对应 500 us */
+#define SERVO_MAX_PULSE_US        2500U           /* 180 度对应 2500 us */
+#define SERVO_MAX_ANGLE_DEG       180             /* 舵机最大机械角度，单位度 */
 
-/* 一个舵机实例关联一个定时器句柄和一个 PWM 输出通道。 */
-typedef struct
-{
-    TIM_HandleTypeDef *htim;
-    uint32_t channel;
-} Servo_HandleTypeDef;
+/**
+  * @brief  初始化并启动 TIM2_CH2 的 PWM 输出。
+  * @note   调用前必须已经执行 MX_TIM2_Init()。
+  *         该函数只启动 PWM 通道，不修改 CubeMX 中设置的 CCR 初值。
+  * @retval HAL_OK PWM 启动成功。
+  * @retval HAL_ERROR PWM 启动失败。
+  */
+HAL_StatusTypeDef Servo_Init(void);
 
-/* 初始化并启动 PWM；要求定时器计数单位为 1 us，自动重装值至少为 2500。 */
-/* 初始化只启动当前比较值，不会设置中位或其他目标位置。 */
-HAL_StatusTypeDef Servo_Init(Servo_HandleTypeDef *servo,
-                             TIM_HandleTypeDef *htim,
-                             uint32_t channel);
-/* 直接设置脉宽，超出 500~2500 us 时会限制到边界。 */
-HAL_StatusTypeDef Servo_SetPulseUs(Servo_HandleTypeDef *servo,
-                                   uint32_t pulse_us);
-/* 将 0~180 度线性换算为脉宽，超出范围的角度会先限幅。 */
-HAL_StatusTypeDef Servo_SetAngle(Servo_HandleTypeDef *servo,
-                                 int32_t angle_deg);
-/* 停止 PWM 输出；普通舵机停止脉冲后通常不再主动保持位置。 */
-HAL_StatusTypeDef Servo_Stop(Servo_HandleTypeDef *servo);
+/**
+  * @brief  直接设置舵机脉宽。
+  * @param  pulse_us 目标脉宽，单位 us；超出 500~2500 us 时自动限幅。
+  * @note   脉冲宽度最终写入 TIM2 的 CCR2 寄存器。
+  */
+void Servo_SetPulseUs(uint32_t pulse_us);
+
+/**
+  * @brief  设置舵机角度。
+  * @param  angle_deg 目标角度，单位度；超出 0~180 度时自动限幅。
+  * @note   角度与脉宽按以下关系线性换算：
+  *         pulse_us = 500 + (2500 - 500) * angle_deg / 180。
+  */
+void Servo_SetAngle(int32_t angle_deg);
+
+/**
+  * @brief  停止 TIM2_CH2 的 PWM 输出。
+  * @note   停止脉冲后，普通舵机通常不再主动保持位置。
+  * @retval HAL_OK 停止成功。
+  * @retval HAL_ERROR 停止失败。
+  */
+HAL_StatusTypeDef Servo_Stop(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* SERVO_DRIVER_H */

@@ -28,6 +28,10 @@ extern "C" {
 
 #include "stm32f4xx_hal.h"
 
+/* 继电器硬件映射：更换控制引脚时只需要修改这两个宏。 */
+#define RELAY_IN_GPIO_PORT    GPIOF
+#define RELAY_IN_GPIO_PIN     GPIO_PIN_0
+
 /**
   * @brief  初始化继电器控制输出。
   * @note   调用前必须先执行 MX_GPIO_Init()，确保 PF0 已配置为推挽输出。

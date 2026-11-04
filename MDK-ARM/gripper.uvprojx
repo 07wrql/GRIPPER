@@ -81,7 +81,7 @@
           </BeforeMake>
           <AfterMake>
             <RunUserProg1>0</RunUserProg1>
-            <RunUserProg2>0</RunUserProg2>
+            <RunUserProg2>1</RunUserProg2>
             <UserProg1Name></UserProg1Name>
             <UserProg2Name></UserProg2Name>
             <UserProg1Dos16Mode>0</UserProg1Dos16Mode>
@@ -707,6 +707,16 @@
               <FileName>gripper_control.h</FileName>
               <FileType>5</FileType>
               <FilePath>../Control/gripper_control.h</FilePath>
+            </File>
+            <File>
+              <FileName>gripper_sequence.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Control/gripper_sequence.c</FilePath>
+            </File>
+            <File>
+              <FileName>gripper_sequence.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Control/gripper_sequence.h</FilePath>
             </File>
           </Files>
         </Group>

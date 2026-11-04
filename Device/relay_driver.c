@@ -3,19 +3,13 @@
   * @file           : relay_driver.c
   * @brief          : 单路 5V 继电器模块控制驱动
   ******************************************************************************
-  * 当前继电器模块的四路跳线均连接 HIGH 与中间针，因此每一路都是：
-  *   控制端 = 高电平 -> 光耦导通 -> 三极管导通 -> 继电器线圈吸合
-  *   控制端 = 低电平 -> 光耦截止 -> 三极管截止 -> 继电器线圈释放
-  *
-  * 本工程只使用第一路，控制端固定映射到 PF0。PF0 的电气配置由 CubeMX
-  * 生成在 gpio.c 中，本文件只实现与业务无关的输出控制接口。
+  * 当光电门识别到物体时，返回一个低电平，此时
   ******************************************************************************
   */
 
 #include "relay_driver.h"
-#include "main.h"
 
-/* 高电平触发板的有效和无效 GPIO 电平，修改硬件触发方式时只需调整这里。 */
+/* 继电器:高电平吸合，低电平释放 */
 #define RELAY_ACTIVE_LEVEL   GPIO_PIN_SET
 #define RELAY_INACTIVE_LEVEL GPIO_PIN_RESET
 
@@ -26,7 +20,9 @@
   */
 void Relay_Init(void)
 {
-    HAL_GPIO_WritePin(RELAY_IN_GPIO_Port, RELAY_IN_Pin, RELAY_INACTIVE_LEVEL);
+    HAL_GPIO_WritePin(RELAY_IN_GPIO_PORT,
+                      RELAY_IN_GPIO_PIN,
+                      RELAY_INACTIVE_LEVEL);
 }
 
 /**
@@ -36,8 +32,8 @@ void Relay_Init(void)
   */
 void Relay_Set(uint8_t enabled)
 {
-    HAL_GPIO_WritePin(RELAY_IN_GPIO_Port,
-                      RELAY_IN_Pin,
+    HAL_GPIO_WritePin(RELAY_IN_GPIO_PORT,
+                      RELAY_IN_GPIO_PIN,
                       (enabled != 0U) ? RELAY_ACTIVE_LEVEL
                                      : RELAY_INACTIVE_LEVEL);
 }
@@ -77,7 +73,7 @@ void Relay_Toggle(void)
   */
 uint8_t Relay_GetState(void)
 {
-    return (HAL_GPIO_ReadPin(RELAY_IN_GPIO_Port, RELAY_IN_Pin) ==
+    return (HAL_GPIO_ReadPin(RELAY_IN_GPIO_PORT, RELAY_IN_GPIO_PIN) ==
             RELAY_ACTIVE_LEVEL)
                ? 1U
                : 0U;
