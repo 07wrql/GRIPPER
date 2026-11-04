@@ -16,18 +16,20 @@
 
 /* J60 节点分配。 */
 #define GRIPPER_ARM_ID                        8U
-#define GRIPPER_BELT_ID                       4U
+#define GRIPPER_BELT_ID                       2U
 
 /* 右摇杆和左摇杆死区。 */
 #define GRIPPER_STICK_DEADBAND                0.08f
 
 /* 摇杆满量程时对应的目标速度。 */
 #define GRIPPER_ARM_MAX_SPEED_RAD_S           0.20f
-#define GRIPPER_BELT_MAX_SPEED_RAD_S          0.80f
+#define GRIPPER_BELT_MAX_SPEED_RAD_S          1.50f
 
-/* 大臂和传送轮以启动位置为中心的软件行程限制。 */
-#define GRIPPER_ARM_TRAVEL_LIMIT_RAD          0.80f
-#define GRIPPER_BELT_TRAVEL_LIMIT_RAD         2.00f
+/* 大臂和小臂均使用固定绝对软件行程限制。 */
+#define GRIPPER_ARM_MIN_RAD                   (-1.590f)
+#define GRIPPER_ARM_MAX_RAD                   ( 0.220f)
+#define GRIPPER_BELT_MIN_RAD                   (-2.750f)
+#define GRIPPER_BELT_MAX_RAD                   (-0.260f)
 
 /* 右摇杆上推为正值时，取反后大臂顺时针运动。 */
 #define GRIPPER_ARM_DIRECTION                 (-1.0f)
@@ -52,10 +54,10 @@
 /* 位置环参数，可在 Keil Watch 中直接修改。 */
 volatile Gripper_pid gripper_pid =
 {
-  .arm_kp = 0.0f,
-  .arm_kd = 0.0f,
-  .belt_kp = 0.0f,
-  .belt_kd = 0.0f
+  .arm_kp = 12.0f,
+  .arm_kd = 0.5f,
+  .belt_kp = 12.0f,
+  .belt_kd = 0.5f
 };
 
 /* 两个 J60 的当前目标位置。 */
@@ -271,14 +273,16 @@ static void GripperControl_Initialize(CAN_HandleTypeDef *hcan)
   gripper_position.arm_target_rad = arm_actual_rad;
   gripper_position.belt_target_rad = belt_actual_rad;
 
-  /* 以启动位置为中心建立相对软件行程限制。 */
-  s_arm_min_rad = arm_actual_rad - GRIPPER_ARM_TRAVEL_LIMIT_RAD;
-  s_arm_max_rad = arm_actual_rad + GRIPPER_ARM_TRAVEL_LIMIT_RAD;
-  s_belt_min_rad = belt_actual_rad - GRIPPER_BELT_TRAVEL_LIMIT_RAD;
-  s_belt_max_rad = belt_actual_rad + GRIPPER_BELT_TRAVEL_LIMIT_RAD;
+  /* 大臂和小臂均使用固定绝对限位。 */
+  s_arm_min_rad = GRIPPER_ARM_MIN_RAD;
+  s_arm_max_rad = GRIPPER_ARM_MAX_RAD;
+  s_belt_min_rad = GRIPPER_BELT_MIN_RAD;
+  s_belt_max_rad = GRIPPER_BELT_MAX_RAD;
 
   if ((gripper_position.arm_target_rad < s_arm_min_rad) ||
-      (gripper_position.arm_target_rad > s_arm_max_rad))
+      (gripper_position.arm_target_rad > s_arm_max_rad) ||
+      (gripper_position.belt_target_rad < s_belt_min_rad) ||
+      (gripper_position.belt_target_rad > s_belt_max_rad))
   {
     GripperControl_FailSafe();
     return;
