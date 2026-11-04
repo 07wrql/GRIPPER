@@ -22,12 +22,12 @@
 #define GRIPPER_STICK_DEADBAND                0.08f
 
 /* 摇杆满量程时对应的目标速度。 */
-#define GRIPPER_ARM_MAX_SPEED_RAD_S           0.20f
+#define GRIPPER_ARM_MAX_SPEED_RAD_S           0.50f
 #define GRIPPER_BELT_MAX_SPEED_RAD_S          1.50f
 
 /* 大臂和小臂均使用固定绝对软件行程限制。 */
-#define GRIPPER_ARM_MIN_RAD                   (-1.590f)
-#define GRIPPER_ARM_MAX_RAD                   ( 0.220f)
+#define GRIPPER_ARM_MIN_RAD                   (-1.625f)
+#define GRIPPER_ARM_MAX_RAD                   ( 0.270f)
 #define GRIPPER_BELT_MIN_RAD                   (-2.750f)
 #define GRIPPER_BELT_MAX_RAD                   (-0.260f)
 
@@ -54,10 +54,10 @@
 /* 位置环参数，可在 Keil Watch 中直接修改。 */
 volatile Gripper_pid gripper_pid =
 {
-  .arm_kp = 12.0f,
-  .arm_kd = 0.5f,
+  .arm_kp = 15.0f,
+  .arm_kd = 0.8f,
   .belt_kp = 12.0f,
-  .belt_kd = 0.5f
+  .belt_kd = 0.8f
 };
 
 /* 两个 J60 的当前目标位置。 */
