@@ -178,7 +178,7 @@
         <Ww>
           <count>4</count>
           <WinNumber>1</WinNumber>
-          <ItemText>g_gripper_init_count,0x0A</ItemText>
+          <ItemText>gripper_servo_config,0x0A</ItemText>
         </Ww>
       </WatchWindow1>
       <Tracepoint>

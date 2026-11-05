@@ -3,7 +3,8 @@
  * @brief   夹爪气泵、光电门和舵机顺序控制实现。
  * @details
  *   本模块实现固定夹取流程，并通过状态机保证舵机动作成对出现：
- *   0 度 -> 180 度 -> 0 度。只有回到 0 度后，才允许下一轮 180 度动作。
+ *   HOME 角度 -> FLIP 角度 -> HOME 角度。只有回到 HOME 角度后，
+ *   才允许下一轮翻转动作。
  *
  *   2 档不参与控制；1 档只负责打开气泵；3 档负责舵机翻转。
  *   拨杆按档位变化沿触发，光电门直接读取原始电平。所有输出只在状态迁移时
@@ -15,10 +16,17 @@
 #include "relay_driver.h"
 #include "servo_driver.h"
 
-/* ========================== 配置常量 ========================== */
+/* ========================== 可调试配置 ========================== */
 
-#define GRIPPER_SERVO_HOME_ANGLE          0
-#define GRIPPER_SERVO_FLIP_ANGLE          180
+/*
+ * 舵机角度配置。两个字段均可在 Keil Watch 中直接修改，单位为度。
+ * 修改后从下一次对应角度切换开始生效；启动角度在复位初始化时生效。
+ */
+volatile GripperServoConfig_t gripper_servo_config =
+{
+  .home_angle_deg = 0,
+  .flip_angle_deg = 180
+};
 
 /* ========================== 内部类型 ========================== */
 
@@ -28,9 +36,9 @@ typedef enum
   GRIPPER_SEQ_DISARMED = 0,   /* 安全等待，气泵关闭 */
   GRIPPER_SEQ_WAIT_OBJECT,    /* 气泵打开，等待光电门检测物体 */
   GRIPPER_SEQ_CLAMPED,        /* 气泵关闭，等待第一次进入 3 档 */
-  GRIPPER_SEQ_FLIPPED,        /* 舵机 180 度，等待进入 1 档 */
+  GRIPPER_SEQ_FLIPPED,        /* 舵机位于 FLIP 角度，等待进入 1 档 */
   GRIPPER_SEQ_REOPENED,       /* 气泵打开，等待第二次进入 3 档 */
-  GRIPPER_SEQ_WAIT_RELEASE    /* 舵机 0 度，等待光电门恢复低电平 */
+  GRIPPER_SEQ_WAIT_RELEASE    /* 舵机位于 HOME 角度，等待光电门恢复低电平 */
 } GripperSequence_State;
 
 
@@ -40,7 +48,7 @@ typedef enum
 static GripperSequence_State s_state = GRIPPER_SEQ_DISARMED;
 static uint8_t s_servo_ready;
 static uint8_t s_pump_on;
-static int32_t s_servo_angle = GRIPPER_SERVO_HOME_ANGLE;
+static int32_t s_servo_angle;
 
 /* 左拨杆当前档位和变化沿检测状态。 */
 static uint8_t s_switch_stable;
@@ -133,9 +141,9 @@ HAL_StatusTypeDef GripperSequence_Init(void)
     return HAL_ERROR;
   }
 
-	//刚开始先设置舵机初始角度为0，需要调试
-  Servo_SetAngle(GRIPPER_SERVO_HOME_ANGLE);
-  s_servo_angle = GRIPPER_SERVO_HOME_ANGLE;
+  /* 启动时直接使用结构体中的 HOME 角度。 */
+  Servo_SetAngle(gripper_servo_config.home_angle_deg);
+  s_servo_angle = gripper_servo_config.home_angle_deg;
   s_servo_ready = 1U;
   return HAL_OK;
 }
@@ -160,13 +168,13 @@ void GripperSequence_Step(const Remote_Data *remote)
   switch (s_state)
   {
     case GRIPPER_SEQ_DISARMED:
-      /* 进入 1 档后重新开泵；若舵机仍在 180 度，等待下一次 3 档回零。 */
+      /* 进入 1 档后重新开泵；若舵机仍在 FLIP 角度，等待下一次 3 档回位。 */
       if (switch_position == 1U)
       {
 				//设置气泵开，张开夹爪
         GripperSequence_SetPump(1U);
 				//进入等待物体进来阶段
-        s_state = (s_servo_angle == GRIPPER_SERVO_FLIP_ANGLE)
+        s_state = (s_servo_angle == gripper_servo_config.flip_angle_deg)
                       ? GRIPPER_SEQ_REOPENED
                       : GRIPPER_SEQ_WAIT_OBJECT;
       }
@@ -182,16 +190,16 @@ void GripperSequence_Step(const Remote_Data *remote)
       break;
 
     case GRIPPER_SEQ_CLAMPED:
-      /* 第一次进入 3 档：舵机 0 度 -> 180 度。 */
+      /* 第一次进入 3 档：舵机 HOME 角度 -> FLIP 角度。 */
       if (switch_position == 3U)
       {
-        GripperSequence_SetServo(GRIPPER_SERVO_FLIP_ANGLE);
+        GripperSequence_SetServo(gripper_servo_config.flip_angle_deg);
         s_state = GRIPPER_SEQ_FLIPPED;
       }
       break;
 
     case GRIPPER_SEQ_FLIPPED:
-      /* 回到 1 档重新开泵，舵机保持 180 度。 */
+      /* 回到 1 档重新开泵，舵机保持 FLIP 角度。 */
       if (switch_position == 1U)
       {
         GripperSequence_SetPump(1U);
@@ -200,10 +208,10 @@ void GripperSequence_Step(const Remote_Data *remote)
       break;
 
     case GRIPPER_SEQ_REOPENED:
-      /* 第二次进入 3 档：舵机 180 度 -> 0 度。 */
+      /* 第二次进入 3 档：舵机 FLIP 角度 -> HOME 角度。 */
       if (switch_position == 3U)
       {
-        GripperSequence_SetServo(GRIPPER_SERVO_HOME_ANGLE);
+        GripperSequence_SetServo(gripper_servo_config.home_angle_deg);
         s_state = GRIPPER_SEQ_WAIT_RELEASE;
       }
       break;
