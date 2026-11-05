@@ -1,14 +1,18 @@
 /**
  * @file    gripper_sequence.c
- * @brief   夹爪气泵、光电门和舵机顺序控制实现。
+ * @brief   气泵、光电门和舵机独立控制实现。
  * @details
- *   本模块实现固定夹取流程，并通过状态机保证舵机动作成对出现：
- *   HOME 角度 -> FLIP 角度 -> HOME 角度。只有回到 HOME 角度后，
- *   才允许下一轮翻转动作。
+ *   气泵与舵机使用独立就绪标志，互不阻塞：
+ *   - 气泵只依赖继电器和光电门接口；
+ *   - 舵机只依赖PWM输出；
+ *   - 初始化只执行一次，失败后不自动重试；
+ *   - J60状态完全不在本模块中判断。
  *
- *   2 档不参与控制；1 档只负责打开气泵；3 档负责舵机翻转。
- *   拨杆按档位变化沿触发，光电门直接读取原始电平。所有输出只在状态迁移时
- *   更新，不使用阻塞延时。
+ *   拨杆规则：
+ *   - 3档无输出动作，只作为中位；
+ *   - 1档按电平打开气泵；
+ *   - 每次首次进入2档时翻转一次舵机标志；
+ *   - 光电门在3档检测到物体时关闭气泵。
  */
 
 #include "gripper_sequence.h"
@@ -16,224 +20,251 @@
 #include "relay_driver.h"
 #include "servo_driver.h"
 
-/* ========================== 可调试配置 ========================== */
+
+/* ========================== 固定角度定义 ========================== */
 
 /*
- * 舵机角度配置。两个字段均可在 Keil Watch 中直接修改，单位为度。
- * 修改后从下一次对应角度切换开始生效；启动角度在复位初始化时生效。
+ * 舵机角度定义，单位为度。修改后需要重新编译才能生效。
  */
-volatile GripperServoConfig_t gripper_servo_config =
-{
-  .home_angle_deg = 0,
-  .flip_angle_deg = 180
-};
+#define GRIPPER_SERVO_HOME_ANGLE_DEG  (0)
+#define GRIPPER_SERVO_FLIP_ANGLE_DEG  (180)
 
-/* ========================== 内部类型 ========================== */
+/* ========================== 运行状态 ========================== */
 
-/* 夹取流程状态。 */
-typedef enum
-{
-  GRIPPER_SEQ_DISARMED = 0,   /* 安全等待，气泵关闭 */
-  GRIPPER_SEQ_WAIT_OBJECT,    /* 气泵打开，等待光电门检测物体 */
-  GRIPPER_SEQ_CLAMPED,        /* 气泵关闭，等待第一次进入 3 档 */
-  GRIPPER_SEQ_FLIPPED,        /* 舵机位于 FLIP 角度，等待进入 1 档 */
-  GRIPPER_SEQ_REOPENED,       /* 气泵打开，等待第二次进入 3 档 */
-  GRIPPER_SEQ_WAIT_RELEASE    /* 舵机位于 HOME 角度，等待光电门恢复低电平 */
-} GripperSequence_State;
-
-
-
-/* ========================== 内部状态 ========================== */
-
-static GripperSequence_State s_state = GRIPPER_SEQ_DISARMED;
-static uint8_t s_servo_ready;
-static uint8_t s_pump_on;
-static int32_t s_servo_angle;
-
-/* 左拨杆当前档位和变化沿检测状态。 */
-static uint8_t s_switch_stable;
-static uint8_t s_switch_valid;
-
-/* 光电门当前电平。 */
-static uint8_t s_photo_stable;
+volatile GripperRuntime_t g_gripper_runtime;
 
 /* ========================== 输出控制 ========================== */
 
 /**
  * @brief  设置气泵状态。
- * @param  enabled 1：气泵开，夹爪张开；0：气泵关，夹爪闭合。
+ * @param  on 1：气泵打开、释放；0：气泵关闭、夹紧。
  */
-static void GripperSequence_SetPump(uint8_t enabled)
+static void GripperSequence_SetPumpOn(uint8_t on)
 {
-  if (s_pump_on != enabled)
+  uint8_t next_on = (on != 0U) ? 1U : 0U;
+
+  if (g_gripper_runtime.pump_on != next_on)
   {
-    Relay_Set(enabled);
-    s_pump_on = enabled;
+    Relay_Set(next_on);
+    g_gripper_runtime.pump_on = next_on;
   }
 }
 
 /**
- * @brief  设置舵机角度，仅在目标角度变化时写 PWM。
+ * @brief  在舵机就绪时设置目标角度并更新PWM。
  * @param  angle_deg 目标角度，单位度。
  */
 static void GripperSequence_SetServo(int32_t angle_deg)
 {
-  if ((s_servo_ready != 0U) && (s_servo_angle != angle_deg))
+  if (g_gripper_runtime.servo_ready != 0U)
   {
     Servo_SetAngle(angle_deg);
-    s_servo_angle = angle_deg;
   }
 }
 
 /**
- * @brief  检查左拨杆档位，并在档位变化时返回当前档位。
- * @param  remote 最新遥控数据。
- * @return 0 表示档位没有变化；1/2/3 表示刚进入对应档位。
+ * @brief  翻转舵机标志，并执行一次对应的HOME/翻转角度动作。
  */
-static uint8_t GripperSequence_UpdateSwitch(const Remote_Data *remote)
+static void GripperSequence_ToggleServo(void)
 {
-  uint8_t position = remote->s[REMOTE_SW_LEFT_S1];
+  g_gripper_runtime.servo_flipped =
+      (g_gripper_runtime.servo_flipped == 0U) ? 1U : 0U;
 
-  /* 第一次取得有效遥控数据时，把当前档位作为初值。 */
-  if (s_switch_valid == 0U)
-  {
-    s_switch_stable = position;
-    s_switch_valid = 1U;
-    return position;
-  }
-
-  /* 不做软件防抖，只在档位发生变化的周期触发一次。 */
-  if (position != s_switch_stable)
-  {
-    s_switch_stable = position;
-    return position;
-  }
-
-  return 0U;
+  GripperSequence_SetServo(
+      (g_gripper_runtime.servo_flipped != 0U)
+          ? GRIPPER_SERVO_FLIP_ANGLE_DEG
+          : GRIPPER_SERVO_HOME_ANGLE_DEG);
 }
-
 
 /**
- * @brief  读取光电门当前电平。
- *
- * STAB-13DTN 在光束被遮挡时输出高电平，因此 s_photo_stable 为 1
+ * @brief  独立初始化气泵子系统。
+ * @retval HAL_OK    继电器输出初始化成功。
+ * @retval HAL_ERROR 继电器输出状态异常。
  */
-static void GripperSequence_UpdatePhoto(void)
+static HAL_StatusTypeDef GripperSequence_InitPump(void)
 {
-  /* 高电平表示检测到物体，低电平表示光束畅通。 */
-  s_photo_stable = (PhotoGate_ReadRawLevel() == GPIO_PIN_SET) ? 1U : 0U;
+  /*
+	* 继电器初始化，低电平，不给气
+   */
+  Relay_Init();
+
+  g_gripper_runtime.pump_ready = 1U;
+
+  return HAL_OK;
 }
 
-/* ========================== 公共接口 ========================== */
-
-HAL_StatusTypeDef GripperSequence_Init(void)
+/**
+ * @brief  独立初始化舵机子系统。
+ * @retval HAL_OK    PWM启动成功且HOME角度已输出。
+ * @retval HAL_ERROR PWM启动失败或通道未进入运行状态。
+ */
+static HAL_StatusTypeDef GripperSequence_InitServo(void)
 {
-  /* 初始化期间先保证气泵关闭，再启动舵机 PWM。 */
-  Relay_Init();                    //继电器初始化
-  s_pump_on = 0U;
-  s_servo_ready = 0U;
-  s_state = GRIPPER_SEQ_DISARMED;  //安全等待
-  s_switch_valid = 0U;
-  s_photo_stable = 0U;
+  /*
+   * 舵机初始化只依赖TIM PWM，不检查气泵或J60。
+   * 先设置HOME角度，再启动PWM，避免启动瞬间输出错误脉宽。
+   */
+  g_gripper_runtime.servo_ready = 0U;
+
+  Servo_SetAngle(GRIPPER_SERVO_HOME_ANGLE_DEG);
 
   if (Servo_Init() != HAL_OK)
   {
     return HAL_ERROR;
   }
 
-  /* 启动时直接使用结构体中的 HOME 角度。 */
-  Servo_SetAngle(gripper_servo_config.home_angle_deg);
-  s_servo_angle = gripper_servo_config.home_angle_deg;
-  s_servo_ready = 1U;
+	//0表示位于0°
+  g_gripper_runtime.servo_flipped = 0U;
+  g_gripper_runtime.servo_ready = 1U;
   return HAL_OK;
 }
 
+/**
+ * @brief  检测左拨杆是否刚刚进入新档位。
+ * @param  remote 最新遥控数据。
+ * @return 0表示没有档位变化；1/2/3表示刚进入对应档位。
+ * @note   不做软件消抖。首次取得有效数据时只记录当前档位，不执行动作。
+ */
+static uint8_t GripperSequence_UpdateSwitch(const Remote_Data *remote)
+{
+  uint8_t position = remote->s[REMOTE_SW_LEFT_S1];
+
+  if ((position < 1U) || (position > 3U))
+  {
+    return 0U;
+  }
+
+  if (g_gripper_runtime.switch_valid == 0U)
+  {
+    g_gripper_runtime.switch_position = position;
+    g_gripper_runtime.switch_valid = 1U;
+    return 0U;
+  }
+
+  if (position != g_gripper_runtime.switch_position)
+  {
+    g_gripper_runtime.switch_position = position;
+    return position;
+  }
+
+  return 0U;
+}
+
+/**
+ * @brief  读取光电门当前电平。
+ */
+static void GripperSequence_UpdatePhoto(void)
+{
+  g_gripper_runtime.photo_level =
+      (PhotoGate_ReadRawLevel() == GPIO_PIN_SET) ? 1U : 0U;
+}
+
+/* ========================== 公共接口 ========================== */
+
+void GripperSequence_Init(void)
+{
+  /* 彼此独立，初始化气泵和舵机 */
+  (void)GripperSequence_InitPump();
+  (void)GripperSequence_InitServo();
+}
+
+/**
+ * @brief  执行一次夹爪控制周期。
+ * @param  remote 最新遥控数据；为NULL或离线时进入夹爪安全状态。
+ * @details
+ *   本函数由控制任务每1ms调用一次，只完成一次输入采样和输出更新，
+ *   不使用阻塞延时，也不会等待气泵或舵机完成机械动作。
+ *
+ *   单次调用按以下顺序处理：
+ *   1. 检查遥控数据，无效时关闭气泵并清空拨杆状态；
+ *   2. 检测左拨杆是否发生档位变化，并保存当前有效档位；
+ *   3. 气泵首次就绪后主动打开一次；
+ *   4. 仅在首次进入2档的周期翻转一次舵机；
+ *   5. 在1档按电平打开气泵，读取光电门，并在3档检测到物体时关闭气泵。
+ *
+ * @note
+ *   - 气泵和舵机分别依据各自的ready标志执行，互不阻塞；
+ *   - 档位动作采用变化检测，拨杆停留在2档期间不会重复翻转舵机；
+ *   - 光电门只参与气泵控制，关闭气泵不会改变舵机当前角度。
+ */
 void GripperSequence_Step(const Remote_Data *remote)
 {
+  uint8_t switch_edge;
   uint8_t switch_position;
 
-  /* 遥控无效时立即进入安全状态，舵机保持当前角度。 */
-  if ((remote == NULL) || (remote->online == 0U) ||
-      (s_servo_ready == 0U))
+  /* 遥控无效时只进入夹爪自身安全状态，保留各子系统就绪信息。 */
+  if ((remote == NULL) || (remote->online == 0U))
   {
     GripperSequence_FailSafe();
     return;
   }
 
-	//获取左拨杆的最新状态
-  switch_position = GripperSequence_UpdateSwitch(remote);
-	//获取光电门现在的状态
-  GripperSequence_UpdatePhoto();
+	//获取左拨杆刚切换的状态
+  switch_edge = GripperSequence_UpdateSwitch(remote);
+	//获取左摇杆当前状态
+  switch_position = g_gripper_runtime.switch_position;
 
-  switch (s_state)
+
+  /*
+   * 初始化完成后的第一次正常控制主动打开气泵。
+   * 这是初始化动作，不是3档动作；此后3档本身不会再主动开泵。
+   */
+  if ((g_gripper_runtime.pump_ready != 0U) && (g_gripper_runtime.pump_initial_open_done == 0U))
   {
-    case GRIPPER_SEQ_DISARMED:
-      /* 进入 1 档后重新开泵；若舵机仍在 FLIP 角度，等待下一次 3 档回位。 */
-      if (switch_position == 1U)
-      {
-				//设置气泵开，张开夹爪
-        GripperSequence_SetPump(1U);
-				//进入等待物体进来阶段
-        s_state = (s_servo_angle == gripper_servo_config.flip_angle_deg)
-                      ? GRIPPER_SEQ_REOPENED
-                      : GRIPPER_SEQ_WAIT_OBJECT;
-      }
-      break;
+    /*
+     * 该标志置位后不会再次执行初始化开泵；
+     * 之后气泵只由拨杆和光电门逻辑控制。
+     */
+    GripperSequence_SetPumpOn(1U);
+    g_gripper_runtime.pump_initial_open_done = 1U;
+  }
 
-    case GRIPPER_SEQ_WAIT_OBJECT:
-      /* 光电门高电平表示检测到物体，关闭气泵夹紧。 */
-      if (s_photo_stable != 0U)
-      {
-        GripperSequence_SetPump(0U);
-        s_state = GRIPPER_SEQ_CLAMPED;
-      }
-      break;
+  /*
+   * 只在档位变化返回2时翻转一次。
+   * 拨杆停在2档期间不会重复触发；3档仅用于重新允许下一次进入2档。
+   */
+  if ((switch_edge == 2U) && (g_gripper_runtime.servo_ready != 0U))
+  {
+    /*
+     * ToggleServo内部会同时更新servo_flipped标志，
+     * 并输出HOME角度或翻转角度。
+     */
+    GripperSequence_ToggleServo();
+  }
 
-    case GRIPPER_SEQ_CLAMPED:
-      /* 第一次进入 3 档：舵机 HOME 角度 -> FLIP 角度。 */
-      if (switch_position == 3U)
-      {
-        GripperSequence_SetServo(gripper_servo_config.flip_angle_deg);
-        s_state = GRIPPER_SEQ_FLIPPED;
-      }
-      break;
+  /*
+   * 气泵相关处理整体受pump_ready保护；
+   * 气泵未就绪时跳过采样和输出，但不会阻止已经就绪的舵机继续工作。
+   */
+  if (g_gripper_runtime.pump_ready != 0U)
+  {
+    /* 1档按电平打开气泵，只在气泵当前关闭时执行一次打开。 */
+    if ((switch_position == 1U) && (g_gripper_runtime.pump_on == 0U))
+    {
+      /* 拨杆保持在1档时，pump_on会保持为1，不会重复产生开泵动作。 */
+      GripperSequence_SetPumpOn(1U);
+    }
 
-    case GRIPPER_SEQ_FLIPPED:
-      /* 回到 1 档重新开泵，舵机保持 FLIP 角度。 */
-      if (switch_position == 1U)
-      {
-        GripperSequence_SetPump(1U);
-        s_state = GRIPPER_SEQ_REOPENED;
-      }
-      break;
+    /* 每个气泵控制周期刷新一次光电门原始电平，供3档关泵判断使用。 */
+    GripperSequence_UpdatePhoto();
 
-    case GRIPPER_SEQ_REOPENED:
-      /* 第二次进入 3 档：舵机 FLIP 角度 -> HOME 角度。 */
-      if (switch_position == 3U)
-      {
-        GripperSequence_SetServo(gripper_servo_config.home_angle_deg);
-        s_state = GRIPPER_SEQ_WAIT_RELEASE;
-      }
-      break;
-
-    case GRIPPER_SEQ_WAIT_RELEASE:
-      /* 等待光电门恢复低电平，避免同一个物体重复触发下一轮夹紧。 */
-      if (s_photo_stable == 0U)
-      {
-        s_state = GRIPPER_SEQ_WAIT_OBJECT;
-      }
-      break;
-
-    default:
-      GripperSequence_FailSafe();
-      break;
+    /*
+     * 仅当拨杆处于3档、气泵正在工作且光电门检测到物体时关闭气泵。
+     * 该动作只改变气泵输出，不改变舵机当前角度。
+     */
+    if ((switch_position == 3U) &&
+        (g_gripper_runtime.pump_on != 0U) &&
+        (g_gripper_runtime.photo_level != 0U))
+    {
+      GripperSequence_SetPumpOn(0U);
+    }
   }
 }
 
 void GripperSequence_FailSafe(void)
 {
-  /* 停止气泵，舵机保持当前位置，等待遥控重新有效。 */
-  GripperSequence_SetPump(0U);
-  s_state = GRIPPER_SEQ_DISARMED;
-  s_switch_valid = 0U;
+  /* 气泵关闭；舵机PWM继续输出，保持当前角度。 */
+  GripperSequence_SetPumpOn(0U);
+  g_gripper_runtime.switch_valid = 0U;
+  g_gripper_runtime.switch_position = 0U;
 }

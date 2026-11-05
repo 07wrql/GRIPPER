@@ -1,16 +1,20 @@
 /**
  * @file    gripper_sequence.h
- * @brief   夹爪气泵、光电门和舵机顺序控制接口。
+ * @brief   气泵、光电门和舵机独立控制接口。
  * @details
- *   本模块负责一次完整夹取循环：
- *   1. 1 档打开气泵并使夹爪张开；
- *   2. 光电门检测到物体后关闭气泵；
- *   3. 第一次进入 3 档，舵机转到 FLIP 角度；
- *   4. 回到 1 档重新打开气泵；
- *   5. 第二次进入 3 档，舵机回到 HOME 角度。
+ *   本模块内部的气泵和舵机分别初始化、分别就绪：
+ *   1. 气泵初始化失败不会禁止舵机；
+ *   2. 舵机初始化失败不会禁止气泵；
+ *   3. 初始化只执行一次，失败后不自动重试；
+ *   4. J60状态不参与本模块的任何判断。
  *
- *   2 档不参与控制。拨杆按档位变化沿触发，光电门直接读取原始电平，
- *   所有处理均为非阻塞方式，由控制层按 1 ms 周期调用。
+ *   拨杆控制规则：
+ *   1. 3档无输出动作，只作为中位；
+ *   2. 1档按电平打开气泵并清除气泵标志；
+ *   3. 每次首次进入2档翻转一次舵机标志，在HOME/翻转角度之间切换；
+ *   4. 光电门在3档检测到物体时关闭气泵并置位气泵标志。
+ *
+ *   2档采用档位变化检测，不做软件消抖。
  */
 
 #ifndef GRIPPER_SEQUENCE_H
@@ -23,36 +27,44 @@ extern "C" {
 #include "stm32f4xx_hal.h"
 #include "remote_control.h"
 
+
 /**
- * @brief  舵机顺序控制角度配置。
- * @note   两个字段均可在 Keil Watch 中直接修改，单位为度。
- *         驱动层会将最终输出限制在 0~180 度。
+ * @brief  夹爪运行状态。
+ * @note   控制逻辑和Keil Watch共用这一份状态，不再维护两套镜像变量。
  */
 typedef struct
 {
-  int32_t home_angle_deg;        /* 上电初始角度、第二次 3 档回位角度 */
-  int32_t flip_angle_deg;        /* 第一次 3 档翻转角度 */
-} GripperServoConfig_t;
+  uint8_t pump_ready;              /* 1：继电器输出已初始化 */
+  uint8_t servo_ready;             /* 1：舵机PWM已启动 */
+  uint8_t pump_on;                 /* 1：气泵打开；0：气泵关闭 */
+  uint8_t servo_flipped;           /* 1：舵机位于翻转角度；0：位于HOME角度 */
+  uint8_t switch_position;         /* 左拨杆当前档位 */
+  uint8_t switch_valid;            /* 左拨杆档位是否已取得有效值 */
+  uint8_t photo_level;             /* 光电门当前电平 */
+  uint8_t pump_initial_open_done;  /* 1：初始化后的首次开泵已完成 */
+} GripperRuntime_t;
 
-/* 全局配置，可在 Keil Watch 中直接查看和修改。 */
-extern volatile GripperServoConfig_t gripper_servo_config;
+/* 运行状态，可在Keil Watch中直接查看。 */
+extern volatile GripperRuntime_t g_gripper_runtime;
 
 /**
- * @brief  初始化气泵和舵机，并把舵机置于 HOME 角度。
- * @retval HAL_OK    初始化成功。
- * @retval HAL_ERROR 舵机 PWM 启动失败。
+ * @brief  初始化气泵和舵机的公共状态，并分别初始化两个子系统。
+ * @note   气泵和舵机互不依赖。单个子系统初始化失败后保持未就绪，
+ *         不会影响另一个子系统，也不会自动重试。
  */
-HAL_StatusTypeDef GripperSequence_Init(void);
+void GripperSequence_Init(void);
 
 /**
- * @brief  执行一次夹取状态机更新。
- * @param  remote 最新遥控数据，可以为 NULL。
- * @note   由控制层每 1 ms 调用一次，不使用阻塞延时。
+ * @brief  执行一次气泵、光电门和舵机控制更新。
+ * @param  remote 最新遥控数据，可以为NULL。
+ * @note   由控制层每1ms调用一次，不使用阻塞延时。
+ *         气泵和舵机分别依据自己的就绪标志执行。
  */
 void GripperSequence_Step(const Remote_Data *remote);
 
 /**
- * @brief  进入安全状态：关闭气泵并保持舵机当前角度。
+ * @brief  进入夹爪安全状态：关闭气泵，舵机保持当前角度。
+ * @note   仅由遥控掉线等夹爪自身安全条件调用，不由J60故障调用。
  */
 void GripperSequence_FailSafe(void);
 
