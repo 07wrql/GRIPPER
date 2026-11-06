@@ -130,6 +130,10 @@ static uint32_t s_last_status_request_ms;
 static uint8_t s_next_status_node;
 static uint8_t s_control_send_fail_count;
 
+/* 进入反馈阶段时的控制反馈计数，用于确认后续收到的是新反馈。 */
+static uint32_t s_feedback_arm_control_rx_base;
+static uint32_t s_feedback_belt_control_rx_base;
+
 /* ========================== 电机安全控制 ========================== */
 
 /**
@@ -227,6 +231,48 @@ static uint8_t GripperControl_MotorsReady(void)
   }
 
   return ((arm->status == 0U) && (belt->status == 0U)) ? 1U : 0U;
+}
+
+/**
+ * @brief  记录进入反馈阶段时的控制反馈计数。
+ * @param  now 当前系统毫秒时间。
+ * @note   状态查询和使能应答也会刷新last_rx_ms，因此不能只靠在线状态
+ *         判断位置反馈已经建立；必须等待新的控制反馈计数。
+ */
+static void GripperControl_StartFeedbackWait(uint32_t now)
+{
+  const J60_MotorData *arm = J60_GetMotorData(GRIPPER_ARM_ID);
+  const J60_MotorData *belt = J60_GetMotorData(GRIPPER_BELT_ID);
+
+  s_feedback_arm_control_rx_base =
+      (arm != NULL) ? arm->control_rx_count : 0U;
+  s_feedback_belt_control_rx_base =
+      (belt != NULL) ? belt->control_rx_count : 0U;
+
+  GripperControl_SetMotorState(GRIPPER_MOTOR_FEEDBACK, now);
+}
+
+/**
+ * @brief  检查两个节点是否都在进入反馈阶段后返回了新的控制反馈。
+ * @retval 1 两个节点都有新控制反馈。
+ * @retval 0 至少一个节点还没有新的位置反馈。
+ */
+static uint8_t GripperControl_ControlFeedbackFresh(void)
+{
+  const J60_MotorData *arm = J60_GetMotorData(GRIPPER_ARM_ID);
+  const J60_MotorData *belt = J60_GetMotorData(GRIPPER_BELT_ID);
+
+  if ((arm == NULL) || (belt == NULL))
+  {
+    return 0U;
+  }
+
+  return (((uint32_t)(arm->control_rx_count -
+                      s_feedback_arm_control_rx_base) != 0U) &&
+          ((uint32_t)(belt->control_rx_count -
+                      s_feedback_belt_control_rx_base) != 0U))
+             ? 1U
+             : 0U;
 }
 
 /**
@@ -503,7 +549,7 @@ static void GripperControl_MotorStep(const Remote_Data *remote,
         }
         else
         {
-          GripperControl_SetMotorState(GRIPPER_MOTOR_FEEDBACK, now);
+          GripperControl_StartFeedbackWait(now);
         }
       }
       break;
@@ -517,7 +563,8 @@ static void GripperControl_MotorStep(const Remote_Data *remote,
       (void)J60_SendControl(GRIPPER_BELT_ID, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
       GripperControl_RequestStatus(now);
 
-      if (GripperControl_MotorsReady() != 0U)
+      if ((GripperControl_ControlFeedbackFresh() != 0U) &&
+          (GripperControl_MotorsReady() != 0U))
       {
         if (GripperControl_ActivateReady(now) == 0U)
         {

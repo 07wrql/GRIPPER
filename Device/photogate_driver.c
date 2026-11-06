@@ -12,7 +12,7 @@
 
 /**
   * @brief  读取光电门信号线的原始 GPIO 电平。
-  * @note   当前 STAB-13DTN 为 Light-on（入光动作）NPN 输出：
+  * @note   原始电平的物理含义见 photogate_driver.h 中的实测说明。
   */
 GPIO_PinState PhotoGate_ReadRawLevel(void)
 {

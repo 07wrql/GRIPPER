@@ -40,8 +40,7 @@ typedef struct
   uint8_t servo_flipped;           /* 1：舵机位于翻转角度；0：位于HOME角度 */
   uint8_t switch_position;         /* 左拨杆当前档位 */
   uint8_t switch_valid;            /* 左拨杆档位是否已取得有效值 */
-  uint8_t photo_level;             /* 光电门当前电平 */
-  uint8_t pump_initial_open_done;  /* 1：初始化后的首次开泵已完成 */
+  uint8_t photo_level;             /* 光电门检测状态：0=无物体，1=检测到物体 */
 } GripperRuntime_t;
 
 /* 运行状态，可在Keil Watch中直接查看。 */

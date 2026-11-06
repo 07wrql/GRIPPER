@@ -29,6 +29,14 @@
 #define GRIPPER_SERVO_HOME_ANGLE_DEG  (0)
 #define GRIPPER_SERVO_FLIP_ANGLE_DEG  (180)
 
+/*
+ * 气泵逻辑状态到继电器状态的映射。
+ * 当前接线：继电器吸合时气阀断电、夹爪夹紧；
+ *           继电器释放时气阀得电、夹爪张开。
+ */
+#define GRIPPER_PUMP_OPEN_RELAY_STATE   (0U)
+#define GRIPPER_PUMP_CLOSE_RELAY_STATE  (1U)
+
 /* ========================== 运行状态 ========================== */
 
 volatile GripperRuntime_t g_gripper_runtime;
@@ -38,6 +46,7 @@ volatile GripperRuntime_t g_gripper_runtime;
 /**
  * @brief  设置气泵状态。
  * @param  on 1：气泵打开、释放；0：气泵关闭、夹紧。
+ * @note   当前接线与继电器逻辑相反，在这里统一完成极性转换。
  */
 static void GripperSequence_SetPumpOn(uint8_t on)
 {
@@ -45,7 +54,8 @@ static void GripperSequence_SetPumpOn(uint8_t on)
 
   if (g_gripper_runtime.pump_on != next_on)
   {
-    Relay_Set(next_on);
+    Relay_Set((next_on != 0U) ? GRIPPER_PUMP_OPEN_RELAY_STATE
+                              : GRIPPER_PUMP_CLOSE_RELAY_STATE);
     g_gripper_runtime.pump_on = next_on;
   }
 }
@@ -84,10 +94,11 @@ static void GripperSequence_ToggleServo(void)
 static HAL_StatusTypeDef GripperSequence_InitPump(void)
 {
   /*
-	* 继电器初始化，低电平，不给气
+   * 上电默认张开：继电器常闭，气阀得电。
    */
   Relay_Init();
 
+  g_gripper_runtime.pump_on = 1U;
   g_gripper_runtime.pump_ready = 1U;
 
   return HAL_OK;
@@ -151,12 +162,13 @@ static uint8_t GripperSequence_UpdateSwitch(const Remote_Data *remote)
 }
 
 /**
- * @brief  读取光电门当前电平。
+ * @brief  读取并转换光电门检测状态。
+ * @note   运行状态中的 photo_level 是逻辑量：0=无物体，1=检测到物体。
  */
 static void GripperSequence_UpdatePhoto(void)
 {
   g_gripper_runtime.photo_level =
-      (PhotoGate_ReadRawLevel() == GPIO_PIN_SET) ? 1U : 0U;
+      (PhotoGate_ReadRawLevel() == PHOTO_GATE_OBJECT_LEVEL) ? 1U : 0U;
 }
 
 /* ========================== 公共接口 ========================== */
@@ -168,25 +180,8 @@ void GripperSequence_Init(void)
   (void)GripperSequence_InitServo();
 }
 
-/**
- * @brief  执行一次夹爪控制周期。
- * @param  remote 最新遥控数据；为NULL或离线时进入夹爪安全状态。
- * @details
- *   本函数由控制任务每1ms调用一次，只完成一次输入采样和输出更新，
- *   不使用阻塞延时，也不会等待气泵或舵机完成机械动作。
- *
- *   单次调用按以下顺序处理：
- *   1. 检查遥控数据，无效时关闭气泵并清空拨杆状态；
- *   2. 检测左拨杆是否发生档位变化，并保存当前有效档位；
- *   3. 气泵首次就绪后主动打开一次；
- *   4. 仅在首次进入2档的周期翻转一次舵机；
- *   5. 在1档按电平打开气泵，读取光电门，并在3档检测到物体时关闭气泵。
- *
- * @note
- *   - 气泵和舵机分别依据各自的ready标志执行，互不阻塞；
- *   - 档位动作采用变化检测，拨杆停留在2档期间不会重复翻转舵机；
- *   - 光电门只参与气泵控制，关闭气泵不会改变舵机当前角度。
- */
+
+
 void GripperSequence_Step(const Remote_Data *remote)
 {
   uint8_t switch_edge;
@@ -204,48 +199,21 @@ void GripperSequence_Step(const Remote_Data *remote)
 	//获取左摇杆当前状态
   switch_position = g_gripper_runtime.switch_position;
 
-
-  /*
-   * 初始化完成后的第一次正常控制主动打开气泵。
-   * 这是初始化动作，不是3档动作；此后3档本身不会再主动开泵。
-   */
-  if ((g_gripper_runtime.pump_ready != 0U) && (g_gripper_runtime.pump_initial_open_done == 0U))
-  {
-    /*
-     * 该标志置位后不会再次执行初始化开泵；
-     * 之后气泵只由拨杆和光电门逻辑控制。
-     */
-    GripperSequence_SetPumpOn(1U);
-    g_gripper_runtime.pump_initial_open_done = 1U;
-  }
-
-  /*
-   * 只在档位变化返回2时翻转一次。
-   * 拨杆停在2档期间不会重复触发；3档仅用于重新允许下一次进入2档。
-   */
+  //进入2档实现舵机0和180度两种状态的翻转，以3档作为空挡
   if ((switch_edge == 2U) && (g_gripper_runtime.servo_ready != 0U))
   {
-    /*
-     * ToggleServo内部会同时更新servo_flipped标志，
-     * 并输出HOME角度或翻转角度。
-     */
     GripperSequence_ToggleServo();
   }
 
-  /*
-   * 气泵相关处理整体受pump_ready保护；
-   * 气泵未就绪时跳过采样和输出，但不会阻止已经就绪的舵机继续工作。
-   */
+	//如果播放1档且此时夹爪闭合，那夹爪就会打开
   if (g_gripper_runtime.pump_ready != 0U)
   {
-    /* 1档按电平打开气泵，只在气泵当前关闭时执行一次打开。 */
     if ((switch_position == 1U) && (g_gripper_runtime.pump_on == 0U))
     {
-      /* 拨杆保持在1档时，pump_on会保持为1，不会重复产生开泵动作。 */
       GripperSequence_SetPumpOn(1U);
     }
 
-    /* 每个气泵控制周期刷新一次光电门原始电平，供3档关泵判断使用。 */
+    /* 每个气泵控制周期刷新一次光电门检测状态，供3档关泵判断使用。 */
     GripperSequence_UpdatePhoto();
 
     /*
