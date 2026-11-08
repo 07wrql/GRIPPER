@@ -231,8 +231,7 @@ void GripperSequence_Step(const Remote_Data *remote)
 
 void GripperSequence_FailSafe(void)
 {
-  /* 气泵关闭；舵机PWM继续输出，保持当前角度。 */
-  GripperSequence_SetPumpOn(0U);
+  /* 舵机PWM继续输出，保持当前角度。 */
   g_gripper_runtime.switch_valid = 0U;
   g_gripper_runtime.switch_position = 0U;
 }
