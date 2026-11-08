@@ -699,24 +699,14 @@
           <GroupName>Control</GroupName>
           <Files>
             <File>
-              <FileName>gripper_control.c</FileName>
+              <FileName>Grasp_sky_block.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../Control/gripper_control.c</FilePath>
+              <FilePath>../Control/Grasp_sky_block.c</FilePath>
             </File>
             <File>
-              <FileName>gripper_control.h</FileName>
+              <FileName>Grasp_sky_block.h</FileName>
               <FileType>5</FileType>
-              <FilePath>../Control/gripper_control.h</FilePath>
-            </File>
-            <File>
-              <FileName>gripper_sequence.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Control/gripper_sequence.c</FilePath>
-            </File>
-            <File>
-              <FileName>gripper_sequence.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Control/gripper_sequence.h</FilePath>
+              <FilePath>../Control/Grasp_sky_block.h</FilePath>
             </File>
           </Files>
         </Group>

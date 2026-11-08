@@ -7,7 +7,8 @@
  *   - 主机发送的控制参数均为线性量化的无符号整数，本驱动负责物理量转换。
  *   - 所有节点共用一份反馈缓存，接收回调会在 CAN 中断中更新缓存。
  *
- * @note 本文件只定义协议接口和数据结构，不直接操作 STM32 CAN 外设。
+ * @note 本文件提供总线初始化、通用电机组初始化、协议和反馈接口；
+ *       节点选择及应用层控制策略位于 Control 层。
  */
 
 #ifndef J60_DRIVER_H
@@ -77,9 +78,12 @@ typedef struct
     uint32_t last_rx_ms;            /* 最近一次通过基础检查的帧时间，单位：ms */
     uint32_t rx_count;              /* 该节点累计收到的 CAN 帧数 */
     uint32_t control_rx_count;      /* 该节点累计收到的控制反馈帧数 */
+    uint32_t status_rx_count;       /* 该节点累计收到的状态反馈帧数 */
+    uint32_t command_ack_count;     /* 该节点累计收到的命令应答帧数 */
     uint8_t temperature_is_motor;   /* 1：温度来自电机；0：温度来自驱动器 */
     uint8_t online;                 /* 收到过该节点可解析反馈或应答时为 1 */
     uint8_t last_command_ok;        /* 最近一次带应答命令是否执行成功 */
+    uint8_t last_ack_command;       /* 最近一次命令应答对应的命令号 */
 } J60_MotorData;
 
 /**
@@ -102,17 +106,45 @@ extern volatile uint32_t j60_rx_count;
 /* ========================== 初始化接口 ========================== */
 
 /**
- * @brief  初始化 J60 驱动。
+ * @brief  初始化 J60 总线层和协议层。
  * @param  hcan 已配置的 CAN 总线句柄。
+ * @return HAL_OK 表示驱动和 CAN 公共层初始化成功，否则返回 HAL_ERROR。
  * @note   函数会清空全部反馈缓存和帧计数，并通过 BSP 层注册接收回调。
+ *         本函数只准备通信，不对任何电机执行复位或使能。
  */
-void J60_Init(CAN_HandleTypeDef *hcan);
+HAL_StatusTypeDef J60_BusInit(CAN_HandleTypeDef *hcan);
+
+/**
+ * @brief  J60 电机组初始化参数。
+ */
+typedef struct
+{
+    uint8_t reset_error;                /* 1：使能前发送错误复位 */
+    uint32_t online_timeout_ms;         /* 节点在线判定允许的反馈间隔 */
+    uint32_t enable_ack_timeout_ms;     /* 等待全部使能应答的最长时间 */
+    uint32_t feedback_timeout_ms;       /* 等待首次控制/状态反馈的最长时间 */
+    uint32_t status_request_period_ms;  /* 初始化阶段状态请求间隔 */
+} J60_InitMotorsConfig_t;
+
+/**
+ * @brief  阻塞初始化指定的一组 J60 电机节点。
+ * @param  node_ids 节点号数组。
+ * @param  node_count 节点数量。
+ * @param  config 初始化参数。
+ * @retval HAL_OK    所有节点完成失能、复位、使能并返回有效反馈。
+ * @retval HAL_ERROR 参数无效、发送失败、应答超时或反馈确认失败。
+ * @note   调用前必须先调用 J60_BusInit()。函数需在任务上下文运行。
+ *         任一节点失败时会对整组节点发送零控制并失能。
+ */
+HAL_StatusTypeDef J60_InitMotors(const uint8_t *node_ids,
+                                 uint8_t node_count,
+                                 const J60_InitMotorsConfig_t *config);
 
 /* ========================== 命令接口 ========================== */
 
 /*
  * 以下函数向指定节点发送不带数据或带少量配置数据的命令。
- * CAN 发送邮箱暂时占满时返回 HAL_BUSY，调用者可在后续周期重试。
+ * CAN 发送邮箱暂时占满时返回 HAL_BUSY；周期控制可在下一周期重发。
  */
 
 /** @brief 使能指定节点。 */
@@ -161,7 +193,7 @@ HAL_StatusTypeDef J60_SetBandwidth(uint8_t node_id, uint16_t bandwidth_hz);
  * @param  kp               刚度系数。
  * @param  kd               阻尼系数。
  * @retval HAL_OK           控制帧已成功提交到 CAN 发送路径。
- * @retval HAL_BUSY         CAN 发送邮箱暂时占满，可稍后重试。
+ * @retval HAL_BUSY         CAN 发送邮箱暂时占满，可在下一周期重发。
  * @retval HAL_ERROR        节点 ID 或参数无效，或发送失败。
  * @note   各参数超出协议范围时会自动限制到对应边界。
  */
@@ -194,6 +226,17 @@ HAL_StatusTypeDef J60_SendVelocity(uint8_t node_id,
  * @note   缓存会由 CAN 接收回调更新，调用者不得修改返回内容。
  */
 const J60_MotorData *J60_GetMotorData(uint8_t node_id);
+
+/**
+ * @brief  获取指定节点反馈数据的一致快照。
+ * @param  node_id   目标节点 ID。
+ * @param  snapshot  输出缓冲区。
+ * @retval HAL_OK    快照读取成功。
+ * @retval HAL_ERROR 节点 ID 或输出指针无效。
+ * @note   接收中断会更新反馈缓存，多字段判断应使用快照。
+ */
+HAL_StatusTypeDef J60_GetMotorSnapshot(uint8_t node_id,
+                                       J60_MotorData *snapshot);
 
 /**
  * @brief  获取指定节点的最新配置缓存。

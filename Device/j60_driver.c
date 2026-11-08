@@ -1,6 +1,6 @@
 /**
  * @file    j60_driver.c
- * @brief   J60 系列 CAN 驱动器协议实现。
+ * @brief   J60 系列 CAN 驱动器协议与基础驱动实现。
  * @details
  *   本文件负责：
  *   1. 将物理量线性量化并打包成 J60 控制帧；
@@ -8,11 +8,14 @@
  *   3. 在接收回调中解析反馈帧、配置帧和命令应答；
  *   4. 缓存节点反馈并提供带中断保护的状态查询接口。
  *
- * @note 实际 CAN 外设初始化、滤波器和 FIFO 分发由 bsp_can 模块完成。
+ * @note J60总线初始化、通用电机组初始化和反馈判断在本驱动中实现；
+ *       节点选择、控制参数和业务故障处理属于 Control 层。
+ *       实际 CAN 外设初始化、滤波器和 FIFO 分发由 bsp_can 模块完成。
  */
 
 #include "j60_driver.h"
 #include "bsp_can.h"
+#include "cmsis_os2.h"
 #include <string.h>
 
 /* ========================== 内部变量 ========================== */
@@ -135,7 +138,7 @@ static uint8_t j60_node_valid(uint8_t node_id)
  * @param  payload 数据区指针；为 NULL 时使用全 0 数据。
  * @param  dlc     有效数据长度，最大为 8 字节。
  * @retval HAL_OK    报文已成功提交到 BSP CAN 发送路径。
- * @retval HAL_BUSY  发送邮箱暂时占满，可稍后重试。
+ * @retval HAL_BUSY  发送邮箱暂时占满，可在下一周期重发。
  * @retval HAL_ERROR 参数无效或发送失败。
  */
 static HAL_StatusTypeDef j60_send(uint8_t command, uint8_t node_id,
@@ -160,7 +163,7 @@ static HAL_StatusTypeDef j60_send(uint8_t command, uint8_t node_id,
         return HAL_OK;
     }
 
-    /* 发送邮箱暂时占满属于可重试的瞬时拥塞，不应直接按通信故障处理。 */
+    /* 发送邮箱暂时占满属于瞬时拥塞，下一周期可再次提交。 */
     if (result == BSP_CAN_ERR_TX_FULL) {
         return HAL_BUSY;
     }
@@ -170,7 +173,7 @@ static HAL_StatusTypeDef j60_send(uint8_t command, uint8_t node_id,
 
 /* ========================== 初始化接口 ========================== */
 
-void J60_Init(CAN_HandleTypeDef *hcan)
+HAL_StatusTypeDef J60_BusInit(CAN_HandleTypeDef *hcan)
 {
     /* 保存句柄并清空上一轮运行留下的反馈、配置和计数。 */
     s_hcan = hcan;
@@ -180,14 +183,13 @@ void J60_Init(CAN_HandleTypeDef *hcan)
     j60_rx_count = 0;
 
     if (hcan == NULL) {
-        return;
+        return HAL_ERROR;
     }
 
     /* BSP 层负责滤波器、启动、发送和 FIFO 分发，J60 只注册解析函数。 */
     BSP_CAN_RegisterRxCallback(hcan, j60_parse_frame);
-    (void)BSP_CAN_Init(hcan);
+    return (BSP_CAN_Init(hcan) == BSP_CAN_OK) ? HAL_OK : HAL_ERROR;
 }
-
 /* ========================== 命令接口 ========================== */
 
 /* 以下接口是对常用 J60 命令的简单封装。 */
@@ -299,6 +301,315 @@ HAL_StatusTypeDef J60_SendVelocity(uint8_t node_id,
                            torque_nm, 0.0f, kd);
 }
 
+/* ========================== 电机组初始化 ========================== */
+
+typedef struct
+{
+    uint32_t ack_base;
+    uint32_t control_base;
+    uint32_t status_base;
+} J60_InitFeedbackBase_t;
+
+static uint8_t j60_init_config_valid(const uint8_t *node_ids,
+                                     uint8_t node_count,
+                                     const J60_InitMotorsConfig_t *config)
+{
+    uint8_t i;
+    uint8_t j;
+
+    if ((node_ids == NULL) || (node_count == 0U) ||
+        (node_count > J60_NODE_COUNT) || (config == NULL) ||
+        (config->online_timeout_ms == 0U) ||
+        (config->enable_ack_timeout_ms == 0U) ||
+        (config->feedback_timeout_ms == 0U) ||
+        (config->status_request_period_ms == 0U)) {
+        return 0U;
+    }
+
+    for (i = 0U; i < node_count; ++i) {
+        if (node_ids[i] > J60_NODE_MAX) {
+            return 0U;
+        }
+
+        for (j = 0U; j < i; ++j) {
+            if (node_ids[j] == node_ids[i]) {
+                return 0U;
+            }
+        }
+    }
+
+    return 1U;
+}
+
+static HAL_StatusTypeDef j60_init_send_zero_control(
+    const uint8_t *node_ids, uint8_t node_count)
+{
+    uint8_t i;
+
+    for (i = 0U; i < node_count; ++i) {
+        if (J60_SendControl(node_ids[i], 0.0f, 0.0f, 0.0f,
+                            0.0f, 0.0f) != HAL_OK) {
+            return HAL_ERROR;
+        }
+    }
+
+    return HAL_OK;
+}
+
+static HAL_StatusTypeDef j60_init_disable(const uint8_t *node_ids,
+                                          uint8_t node_count)
+{
+    uint8_t i;
+
+    for (i = 0U; i < node_count; ++i) {
+        if (J60_Disable(node_ids[i]) != HAL_OK) {
+            return HAL_ERROR;
+        }
+    }
+
+    return HAL_OK;
+}
+
+static HAL_StatusTypeDef j60_init_reset(const uint8_t *node_ids,
+                                        uint8_t node_count)
+{
+    uint8_t i;
+
+    for (i = 0U; i < node_count; ++i) {
+        if (J60_ResetError(node_ids[i]) != HAL_OK) {
+            return HAL_ERROR;
+        }
+    }
+
+    return HAL_OK;
+}
+
+static HAL_StatusTypeDef j60_init_enable(const uint8_t *node_ids,
+                                         uint8_t node_count)
+{
+    uint8_t i;
+
+    for (i = 0U; i < node_count; ++i) {
+        if (J60_Enable(node_ids[i]) != HAL_OK) {
+            return HAL_ERROR;
+        }
+    }
+
+    return HAL_OK;
+}
+
+static HAL_StatusTypeDef j60_init_request_status(
+    const uint8_t *node_ids, uint8_t node_count)
+{
+    uint8_t i;
+
+    for (i = 0U; i < node_count; ++i) {
+        if (J60_GetStatus(node_ids[i]) != HAL_OK) {
+            return HAL_ERROR;
+        }
+    }
+
+    return HAL_OK;
+}
+
+static void j60_init_safe_stop(const uint8_t *node_ids, uint8_t node_count)
+{
+    (void)j60_init_send_zero_control(node_ids, node_count);
+    (void)j60_init_disable(node_ids, node_count);
+}
+
+static HAL_StatusTypeDef j60_init_record_ack_base(
+    const uint8_t *node_ids, uint8_t node_count,
+    J60_InitFeedbackBase_t *bases)
+{
+    J60_MotorData data;
+    uint8_t i;
+
+    for (i = 0U; i < node_count; ++i) {
+        if (J60_GetMotorSnapshot(node_ids[i], &data) != HAL_OK) {
+            return HAL_ERROR;
+        }
+
+        bases[node_ids[i]].ack_base = data.command_ack_count;
+    }
+
+    return HAL_OK;
+}
+
+static uint8_t j60_init_enable_ack_ready(
+    const uint8_t *node_ids, uint8_t node_count,
+    const J60_InitFeedbackBase_t *bases)
+{
+    J60_MotorData data;
+    uint8_t i;
+
+    for (i = 0U; i < node_count; ++i) {
+        if (J60_GetMotorSnapshot(node_ids[i], &data) != HAL_OK) {
+            return 0U;
+        }
+
+        if ((data.command_ack_count <= bases[node_ids[i]].ack_base) ||
+            (data.last_ack_command != J60_CMD_ENABLE) ||
+            (data.last_command_ok == 0U)) {
+            return 0U;
+        }
+    }
+
+    return 1U;
+}
+
+static HAL_StatusTypeDef j60_init_record_feedback_base(
+    const uint8_t *node_ids, uint8_t node_count,
+    J60_InitFeedbackBase_t *bases)
+{
+    J60_MotorData data;
+    uint8_t i;
+
+    for (i = 0U; i < node_count; ++i) {
+        if (J60_GetMotorSnapshot(node_ids[i], &data) != HAL_OK) {
+            return HAL_ERROR;
+        }
+
+        bases[node_ids[i]].control_base = data.control_rx_count;
+        bases[node_ids[i]].status_base = data.status_rx_count;
+    }
+
+    return HAL_OK;
+}
+
+static uint8_t j60_init_feedback_ready(
+    const uint8_t *node_ids, uint8_t node_count,
+    const J60_InitMotorsConfig_t *config,
+    const J60_InitFeedbackBase_t *bases)
+{
+    J60_MotorData data;
+    uint8_t i;
+
+    for (i = 0U; i < node_count; ++i) {
+        if (J60_GetMotorSnapshot(node_ids[i], &data) != HAL_OK) {
+            return 0U;
+        }
+
+        if ((data.control_rx_count <= bases[node_ids[i]].control_base) ||
+            (data.status_rx_count <= bases[node_ids[i]].status_base) ||
+            (data.status != 0U) ||
+            (J60_IsOnline(node_ids[i], config->online_timeout_ms) == 0U)) {
+            return 0U;
+        }
+    }
+
+    return 1U;
+}
+
+static HAL_StatusTypeDef j60_init_wait_enable_ack(
+    const uint8_t *node_ids, uint8_t node_count,
+    const J60_InitFeedbackBase_t *bases, uint32_t timeout_ms)
+{
+    uint32_t start_ms = HAL_GetTick();
+
+    for (;;) {
+        if (j60_init_enable_ack_ready(node_ids, node_count, bases) != 0U) {
+            return HAL_OK;
+        }
+
+        if ((uint32_t)(HAL_GetTick() - start_ms) >= timeout_ms) {
+            return HAL_ERROR;
+        }
+
+        osDelay(1U);
+    }
+}
+
+static HAL_StatusTypeDef j60_init_wait_feedback(
+    const uint8_t *node_ids, uint8_t node_count,
+    const J60_InitMotorsConfig_t *config,
+    const J60_InitFeedbackBase_t *bases)
+{
+    uint32_t start_ms = HAL_GetTick();
+    uint32_t last_status_request_ms = start_ms;
+
+    (void)j60_init_request_status(node_ids, node_count);
+
+    for (;;) {
+        uint32_t now;
+
+        (void)j60_init_send_zero_control(node_ids, node_count);
+        now = HAL_GetTick();
+
+        if (j60_init_feedback_ready(node_ids, node_count,
+                                    config, bases) != 0U) {
+            return HAL_OK;
+        }
+
+        if ((uint32_t)(now - start_ms) >= config->feedback_timeout_ms) {
+            return HAL_ERROR;
+        }
+
+        if ((uint32_t)(now - last_status_request_ms) >=
+            config->status_request_period_ms) {
+            (void)j60_init_request_status(node_ids, node_count);
+            last_status_request_ms = now;
+        }
+
+        osDelay(1U);
+    }
+}
+
+HAL_StatusTypeDef J60_InitMotors(const uint8_t *node_ids,
+                                 uint8_t node_count,
+                                 const J60_InitMotorsConfig_t *config)
+{
+    J60_InitFeedbackBase_t bases[J60_NODE_COUNT] = {0};
+
+    if (j60_init_config_valid(node_ids, node_count, config) == 0U) {
+        return HAL_ERROR;
+    }
+
+    /* 先零控制并失能，保证初始化期间电机不带输出。 */
+    if ((j60_init_send_zero_control(node_ids, node_count) != HAL_OK) ||
+        (j60_init_disable(node_ids, node_count) != HAL_OK)) {
+        j60_init_safe_stop(node_ids, node_count);
+        return HAL_ERROR;
+    }
+
+    /* 记录应答基准，随后发送错误复位和使能。 */
+    if (j60_init_record_ack_base(node_ids, node_count, bases) != HAL_OK) {
+        j60_init_safe_stop(node_ids, node_count);
+        return HAL_ERROR;
+    }
+
+    if ((config->reset_error != 0U) &&
+        (j60_init_reset(node_ids, node_count) != HAL_OK)) {
+        j60_init_safe_stop(node_ids, node_count);
+        return HAL_ERROR;
+    }
+
+    if (j60_init_enable(node_ids, node_count) != HAL_OK) {
+        j60_init_safe_stop(node_ids, node_count);
+        return HAL_ERROR;
+    }
+
+    /* 只等待使能应答，不单独等待复位应答。 */
+    if (j60_init_wait_enable_ack(node_ids, node_count, bases,
+                                 config->enable_ack_timeout_ms) != HAL_OK) {
+        j60_init_safe_stop(node_ids, node_count);
+        return HAL_ERROR;
+    }
+
+    /* 记录反馈基准，只接受使能之后产生的新反馈。 */
+    if (j60_init_record_feedback_base(node_ids, node_count, bases) != HAL_OK) {
+        j60_init_safe_stop(node_ids, node_count);
+        return HAL_ERROR;
+    }
+
+    if (j60_init_wait_feedback(node_ids, node_count,
+                               config, bases) != HAL_OK) {
+        j60_init_safe_stop(node_ids, node_count);
+        return HAL_ERROR;
+    }
+
+    return HAL_OK;
+}
 /* ========================== 反馈解析 ========================== */
 
 /**
@@ -376,6 +687,7 @@ static void j60_parse_frame(CAN_HandleTypeDef *hcan,
             return;
         }
         motor->status = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+        ++motor->status_rx_count;
         motor->online = 1;
         break;
 
@@ -403,6 +715,8 @@ static void j60_parse_frame(CAN_HandleTypeDef *hcan,
         if (header->DLC < 1u) {
             return;
         }
+        ++motor->command_ack_count;
+        motor->last_ack_command = command;
         motor->last_command_ok = (data[0] == 0u);
         motor->online = 1;
         break;
@@ -414,6 +728,22 @@ static void j60_parse_frame(CAN_HandleTypeDef *hcan,
 }
 
 /* ========================== 反馈查询 ========================== */
+
+HAL_StatusTypeDef J60_GetMotorSnapshot(uint8_t node_id,
+                                       J60_MotorData *snapshot)
+{
+    uint32_t primask;
+
+    if (!j60_node_valid(node_id) || snapshot == NULL) {
+        return HAL_ERROR;
+    }
+
+    primask = j60_enter_critical();
+    *snapshot = j60_motor_data[node_id];
+    j60_exit_critical(primask);
+
+    return HAL_OK;
+}
 
 const J60_MotorData *J60_GetMotorData(uint8_t node_id)
 {

@@ -10,23 +10,17 @@
   *   Prescaler = 83      -> 定时器计数频率 1 MHz，每格 1 us
   *   Period    = 19999   -> PWM 周期 20000 us，即 20 ms
   *   PWM Mode  = PWM1
-  *
-  * 本驱动固定使用 TIM2 的通道 2，不需要在调用时重复传入定时器句柄和通道。
   ******************************************************************************
   */
 
 #ifndef SERVO_DRIVER_H
 #define SERVO_DRIVER_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include "tim.h"
 
-/* 舵机 PWM 硬件映射，修改定时器或通道时只需要调整下面两个宏。 */
-#define SERVO_TIM_HANDLE          (&htim2)        /* TIM2 定时器句柄 */
-#define SERVO_TIM_CHANNEL         TIM_CHANNEL_2   /* TIM2 通道 2，对应 PA1 */
+/* 舵机 PWM 硬件映射 */
+#define SERVO_TIM_HANDLE          (&htim2)        
+#define SERVO_TIM_CHANNEL         TIM_CHANNEL_2   
 
 /* 舵机商品参数给出的脉宽范围和角度范围。 */
 #define SERVO_MIN_PULSE_US        500U            /* 0 度对应 500 us */
@@ -35,10 +29,6 @@ extern "C" {
 
 /**
   * @brief  初始化并启动 TIM2_CH2 的 PWM 输出。
-  * @note   调用前必须已经执行 MX_TIM2_Init()。
-  *         该函数只启动 PWM 通道，不修改 CubeMX 中设置的 CCR 初值。
-  * @retval HAL_OK PWM 启动成功。
-  * @retval HAL_ERROR PWM 启动失败。
   */
 HAL_StatusTypeDef Servo_Init(void);
 
@@ -59,14 +49,8 @@ void Servo_SetAngle(int32_t angle_deg);
 
 /**
   * @brief  停止 TIM2_CH2 的 PWM 输出。
-  * @note   停止脉冲后，普通舵机通常不再主动保持位置。
-  * @retval HAL_OK 停止成功。
-  * @retval HAL_ERROR 停止失败。
   */
 HAL_StatusTypeDef Servo_Stop(void);
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* SERVO_DRIVER_H */

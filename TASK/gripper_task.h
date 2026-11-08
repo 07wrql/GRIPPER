@@ -10,7 +10,6 @@
 extern "C" {
 #endif
 
-/* CubeMX 在 freertos.c 中生成了同名弱函数，本任务提供强实现。 */
 void GRIPPERTask(void *argument);
 
 #ifdef __cplusplus
