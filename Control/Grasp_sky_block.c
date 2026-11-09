@@ -123,6 +123,9 @@ static CAN_HandleTypeDef *s_motor_group_hcan;
 static GraspMotorGroupConfig_t s_motor_group_config;
 /* 各电机控制积分目标，与静态配置分开保存。 */
 static float s_motor_group_target_rad[GRIPPER_MOTOR_COUNT];
+/* 运行时可调的位置刚度和阻尼，默认值来自静态电机配置。 */
+static float s_motor_group_kp[GRIPPER_MOTOR_COUNT];
+static float s_motor_group_kd[GRIPPER_MOTOR_COUNT];
 static uint8_t s_motor_group_ready;
 static uint8_t s_motor_group_initialized;
 static uint8_t s_motor_group_send_fail_count;
@@ -331,6 +334,8 @@ static void GraspSkyBlock_MotorGroupInit(
   {
     node_ids[i] = s_motor_group_config.motors[i].node_id;
     s_motor_group_target_rad[i] = s_motor_group_config.motors[i].min_rad;
+    s_motor_group_kp[i] = s_motor_group_config.motors[i].kp;
+    s_motor_group_kd[i] = s_motor_group_config.motors[i].kd;
   }
 
   /* 先初始化CAN和J60协议层，再对当前夹爪节点执行通用电机初始化。 */
@@ -426,8 +431,8 @@ static uint8_t GraspSkyBlock_MotorGroupControlStep(const float *commands,
                         s_motor_group_target_rad[i],
                         0.0f,
                         0.0f,
-                        axis->kp,
-                        axis->kd) != HAL_OK)
+                        s_motor_group_kp[i],
+                        s_motor_group_kd[i]) != HAL_OK)
     {
       all_ok = 0U;
     }
@@ -716,4 +721,84 @@ void GraspSkyBlock_Run(const Remote_Data *remote, CAN_HandleTypeDef *hcan)
   }
 
   GraspSkyBlock_MotorGroupRun(commands);
+}
+
+
+/**
+ * @brief  设置指定电机轴的运行时Kp。
+ * @param  axis 电机轴索引：0=大臂，1=传送轮。
+ * @param  kp   刚度系数，范围由J60协议限制。
+ * @retval HAL_OK    设置成功。
+ * @retval HAL_ERROR 轴索引或参数无效。
+ */
+HAL_StatusTypeDef GraspSkyBlock_SetKp(uint8_t axis, float kp)
+{
+  if ((axis >= GRIPPER_MOTOR_COUNT) ||
+      (kp != kp) ||
+      (kp < J60_KP_MIN) ||
+      (kp > J60_KP_MAX))
+  {
+    return HAL_ERROR;
+  }
+
+  s_motor_group_kp[axis] = kp;
+  return HAL_OK;
+}
+
+/**
+ * @brief  设置指定电机轴的运行时Kd。
+ * @param  axis 电机轴索引：0=大臂，1=传送轮。
+ * @param  kd   阻尼系数，范围由J60协议限制。
+ * @retval HAL_OK    设置成功。
+ * @retval HAL_ERROR 轴索引或参数无效。
+ */
+HAL_StatusTypeDef GraspSkyBlock_SetKd(uint8_t axis, float kd)
+{
+  if ((axis >= GRIPPER_MOTOR_COUNT) ||
+      (kd != kd) ||
+      (kd < J60_KD_MIN) ||
+      (kd > J60_KD_MAX))
+  {
+    return HAL_ERROR;
+  }
+
+  s_motor_group_kd[axis] = kd;
+  return HAL_OK;
+}
+
+/**
+ * @brief  获取指定电机轴的目标位置和实际位置。
+ * @param  axis        电机轴索引：0=大臂，1=传送轮。
+ * @param  target_rad  输出目标位置，单位：rad。
+ * @param  actual_rad  输出实际位置，单位：rad。
+ * @retval HAL_OK    读取成功。
+ * @retval HAL_ERROR 参数无效、电机组未就绪或反馈离线。
+ */
+HAL_StatusTypeDef GraspSkyBlock_GetTelemetry(uint8_t axis,
+                                             float *target_rad,
+                                             float *actual_rad)
+{
+  J60_MotorData snapshot;
+  uint8_t node_id;
+
+  if ((axis >= GRIPPER_MOTOR_COUNT) ||
+      (target_rad == NULL) ||
+      (actual_rad == NULL) ||
+      (s_motor_group_initialized == 0U) ||
+      (s_motor_group_ready == 0U))
+  {
+    return HAL_ERROR;
+  }
+
+  node_id = s_motor_group_config.motors[axis].node_id;
+
+  if ((J60_IsOnline(node_id, s_motor_group_config.online_timeout_ms) == 0U) ||
+      (J60_GetMotorSnapshot(node_id, &snapshot) != HAL_OK))
+  {
+    return HAL_ERROR;
+  }
+
+  *target_rad = s_motor_group_target_rad[axis];
+  *actual_rad = snapshot.position_rad;
+  return HAL_OK;
 }

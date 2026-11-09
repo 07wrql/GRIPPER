@@ -2,8 +2,7 @@
  * @file    remote_control.c
  * @brief   DJI DT7/DR16 遥控接收机驱动实现。
  * @details
- *   本文件由原 R2_CHASSIS_ZGT 工程中的 C++ Remote 与 UART_DMA_Channel
- *   移植为 C 实现，主要负责：
+ *  主要负责：
  *   1. 配置 USART1 硬件双缓冲 DMA 和空闲中断；
  *   2. 从两块 DMA 缓冲区交替接收 18 字节遥控帧；
  *   3. 解析四个摇杆和两个三段拨杆；

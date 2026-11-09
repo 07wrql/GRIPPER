@@ -2,23 +2,15 @@
  * @file    remote_control.h
  * @brief   DJI DT7/DR16 遥控接收机驱动接口。
  * @details
- *   本驱动由原 R2_CHASSIS_ZGT 工程中的 C++ Remote 与
- *   UART_DMA_Channel 两部分直接移植为 C 语言实现。
- *
  *   接收链路：
  *     USART1_RX (PB7) -> 板载硬件反相器 -> DMA2 Stream2 Channel4
  *     -> 18 字节遥控帧 -> 解析四个摇杆和两个拨杆。
  *
  *   UART 配置：
  *     100000 bps、9 Bits、Even、2 Stop Bits、Receive Only。
- */
-
+ */ 
 #ifndef REMOTE_CONTROL_H
 #define REMOTE_CONTROL_H
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 #include "stm32f4xx_hal.h"
 
@@ -32,7 +24,7 @@ extern "C" {
 
 #define REMOTE_CH_COUNT                4U
 #define REMOTE_SW_COUNT                2U
-#define REMOTE_CH_VALUE_OFFSET      1024
+#define REMOTE_CH_VALUE_OFFSET         1024
 #define REMOTE_STICK_HALF_RANGE       660.0f
 
 /* ========================== 拨杆索引 ========================== */
@@ -122,8 +114,5 @@ uint8_t Remote_GetSnapshot(const Remote_HandleTypeDef *remote,
  */
 float Remote_NormalizeStick(int16_t channel, float deadband);
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* REMOTE_CONTROL_H */

@@ -9,6 +9,7 @@
 #include "cmsis_os2.h"
 #include "can.h"
 #include "usart.h"
+#include "vofa.h"
 
 /* 遥控器数据 */
 Remote_HandleTypeDef s_remote;
@@ -32,12 +33,18 @@ void GRIPPERTask(void *argument)
   (void)GraspSkyBlock_Init();
   (void)GraspSkyBlock_MotorInit(&hcan1);
 
+  /* VOFA使用USART6，统一由vofa模块处理收发。 */
+  Vofa_Init(&huart6);
+
   for (;;)
   {
     /* 刷新在线计数和最新遥控数据。 */
     (void)Remote_Update(&s_remote);
 
     GraspSkyBlock_Run(&s_remote.data, &hcan1);
+
+    /* 解析VOFA命令并每20ms发送目标/实际位置曲线。 */
+    Vofa_Task1ms();
 		
     /* 约1ms周期延时。 */
     osDelay(1U);

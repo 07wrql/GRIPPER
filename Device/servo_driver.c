@@ -50,6 +50,12 @@ void Servo_SetAngle(int32_t angle_deg)
     {
         angle_deg = SERVO_MAX_ANGLE_DEG;
     }
+    pulse_us = SERVO_MIN_PULSE_US +
+        (((SERVO_MAX_PULSE_US - SERVO_MIN_PULSE_US) *
+          (uint32_t)angle_deg +
+          ((uint32_t)SERVO_MAX_ANGLE_DEG / 2U)) /
+         (uint32_t)SERVO_MAX_ANGLE_DEG);
+
     Servo_SetPulseUs(pulse_us);
 }
 

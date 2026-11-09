@@ -6,17 +6,10 @@
  *   1. 配置全接收滤波器、启动 CAN 和 FIFO0 接收中断；
  *   2. 发送经典 CAN 标准数据帧；
  *   3. 从 FIFO0 取出报文并分发给已注册的设备回调。
- *
- *   具体设备协议（例如 J60 的 ID、字节编码和反馈含义）
- *   不属于本层，由 Device 层解析。
  */
 
 #ifndef BSP_CAN_H
 #define BSP_CAN_H
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 #include "can.h"
 
@@ -92,9 +85,5 @@ void BSP_CAN_RegisterRxCallback(CAN_HandleTypeDef *hcan,
  *         只向设备层分发标准数据帧，扩展帧和远程帧会被丢弃。
  */
 void BSP_CAN_ProcessRx(CAN_HandleTypeDef *hcan);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* BSP_CAN_H */

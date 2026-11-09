@@ -84,6 +84,30 @@ HAL_StatusTypeDef GraspSkyBlock_MotorInit(CAN_HandleTypeDef *hcan);
  */
 void GraspSkyBlock_Run(const Remote_Data *remote, CAN_HandleTypeDef *hcan);
 
+/**
+ * @brief  设置指定电机轴的运行时Kp。
+ * @param  axis 电机轴索引：0=大臂，1=传送轮。
+ * @param  kp   刚度系数。
+ */
+HAL_StatusTypeDef GraspSkyBlock_SetKp(uint8_t axis, float kp);
+
+/**
+ * @brief  设置指定电机轴的运行时Kd。
+ * @param  axis 电机轴索引：0=大臂，1=传送轮。
+ * @param  kd   阻尼系数。
+ */
+HAL_StatusTypeDef GraspSkyBlock_SetKd(uint8_t axis, float kd);
+
+/**
+ * @brief  获取指定电机轴的目标位置和实际位置。
+ * @param  axis        电机轴索引：0=大臂，1=传送轮。
+ * @param  target_rad  输出目标位置，单位：rad。
+ * @param  actual_rad  输出实际位置，单位：rad。
+ */
+HAL_StatusTypeDef GraspSkyBlock_GetTelemetry(uint8_t axis,
+                                             float *target_rad,
+                                             float *actual_rad);
+
 #ifdef __cplusplus
 }
 #endif
