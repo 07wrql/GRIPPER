@@ -31,7 +31,12 @@ void GRIPPERTask(void *argument)
 
   /* 上电顺序初始化：先夹爪本体，再J60电机组。 */
   (void)GraspSkyBlock_Init();
-  (void)GraspSkyBlock_MotorInit(&hcan1);
+  if (GraspSkyBlock_MotorInit(&hcan1) != HAL_OK)
+  {
+    /* 给短暂拥塞或总线恢复留出时间，再尝试一次。 */
+    osDelay(20U);
+    (void)GraspSkyBlock_MotorInit(&hcan1);
+  }
 
   /* VOFA使用USART6，统一由vofa模块处理收发。 */
   Vofa_Init(&huart6);
@@ -43,7 +48,7 @@ void GRIPPERTask(void *argument)
 
     GraspSkyBlock_Run(&s_remote.data, &hcan1);
 
-    /* 解析VOFA命令并每20ms发送目标/实际位置曲线。 */
+    /* 解析VOFA命令并每100ms发送目标/实际位置曲线。 */
     Vofa_Task1ms();
 		
     /* 约1ms周期延时。 */

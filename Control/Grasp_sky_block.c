@@ -68,8 +68,8 @@ static const GraspMotorAxisConfig_t s_gripper_motor_config[] =
   },
   {
     .node_id = 2U,
-    .min_rad = -2.750f,
-    .max_rad = -0.260f,
+    .min_rad = -2.50f,
+    .max_rad = -0.2925f,
     .max_speed_rad_s = 1.50f,
     .direction = 1.0f,
     .kp = 12.0f,
@@ -86,7 +86,8 @@ static const GraspMotorGroupConfig_t s_gripper_motor_group_config =
   .motors = s_gripper_motor_config,
   .control_dt_s = 0.001f,
   .online_timeout_ms = 200U,
-  .status_period_ms = 100U,
+  /* 每50ms轮流查询一个节点，每个节点仍约100ms查询一次。 */
+  .status_period_ms = 50U,
   .send_fail_limit = 5U
 };
 
@@ -129,6 +130,7 @@ static float s_motor_group_kd[GRIPPER_MOTOR_COUNT];
 static uint8_t s_motor_group_ready;
 static uint8_t s_motor_group_initialized;
 static uint8_t s_motor_group_send_fail_count;
+static uint8_t s_motor_group_status_axis;
 static uint32_t s_motor_group_last_status_ms;
 
 /* ======================== 电机组内部辅助函数 ======================== */
@@ -200,23 +202,20 @@ static uint8_t GraspSkyBlock_MotorGroupDisableAll(void)
 }
 
 /**
- * @brief  向全部电机请求状态反馈。
- * @return 1：全部请求发送成功；0：至少一个请求失败。
+ * @brief  请求指定电机轴的状态反馈。
+ * @param  axis 电机轴索引。
+ * @return 1：状态请求发送成功；0：索引无效或发送失败。
  */
-static uint8_t GraspSkyBlock_MotorGroupRequestStatusAll(void)
+static uint8_t GraspSkyBlock_MotorGroupRequestStatus(uint8_t axis)
 {
-  uint8_t all_ok = 1U;
-  uint8_t i;
-
-  for (i = 0U; i < GRIPPER_MOTOR_COUNT; ++i)
+  if (axis >= GRIPPER_MOTOR_COUNT)
   {
-    if (J60_GetStatus(s_motor_group_config.motors[i].node_id) != HAL_OK)
-    {
-      all_ok = 0U;
-    }
+    return 0U;
   }
 
-  return all_ok;
+  return (J60_GetStatus(s_motor_group_config.motors[axis].node_id) == HAL_OK)
+             ? 1U
+             : 0U;
 }
 
 /**
@@ -328,6 +327,7 @@ static void GraspSkyBlock_MotorGroupInit(
   s_motor_group_send_fail_count = 0U;
   s_motor_group_ready = 0U;
   s_motor_group_initialized = 1U;
+  s_motor_group_status_axis = 0U;
   s_motor_group_last_status_ms = HAL_GetTick();
 
   for (i = 0U; i < GRIPPER_MOTOR_COUNT; ++i)
@@ -375,17 +375,6 @@ static uint8_t GraspSkyBlock_MotorGroupControlStep(const float *commands,
   float command;
   uint8_t all_ok = 1U;
   uint8_t i;
-
-  /* 状态请求按固定周期发送，降低总线负载并给节点留出反馈更新时间。 */
-  if ((uint32_t)(now - s_motor_group_last_status_ms) >=
-      s_motor_group_config.status_period_ms)
-  {
-    if (GraspSkyBlock_MotorGroupRequestStatusAll() == 0U)
-    {
-      return 0U;
-    }
-    s_motor_group_last_status_ms = now;
-  }
 
   /* 每个控制周期都检查最新反馈，防止节点掉线或报错后继续下发控制。 */
   if (GraspSkyBlock_MotorGroupRuntimeStatusReady() == 0U)
@@ -451,6 +440,27 @@ static uint8_t GraspSkyBlock_MotorGroupControlStep(const float *commands,
   else
   {
     s_motor_group_send_fail_count = 0U;
+  }
+
+  /*
+   * 控制帧优先发送后，再按固定周期轮流查询一个节点。单次最多发送
+   * 2个控制帧和1个状态请求，不超过CAN控制器的3个发送邮箱。
+   */
+  if ((uint32_t)(now - s_motor_group_last_status_ms) >=
+      s_motor_group_config.status_period_ms)
+  {
+    if (GraspSkyBlock_MotorGroupRequestStatus(
+            s_motor_group_status_axis) == 0U)
+    {
+      return 0U;
+    }
+
+    ++s_motor_group_status_axis;
+    if (s_motor_group_status_axis >= GRIPPER_MOTOR_COUNT)
+    {
+      s_motor_group_status_axis = 0U;
+    }
+    s_motor_group_last_status_ms = now;
   }
 
   return 1U;
@@ -763,6 +773,26 @@ HAL_StatusTypeDef GraspSkyBlock_SetKd(uint8_t axis, float kd)
   }
 
   s_motor_group_kd[axis] = kd;
+  return HAL_OK;
+}
+
+/**
+ * @brief  获取指定电机轴当前运行时Kp/Kd。
+ * @param  axis 电机轴索引：0=大臂，1=传送轮。
+ * @param  kp   输出当前Kp。
+ * @param  kd   输出当前Kd。
+ * @retval HAL_OK    读取成功。
+ * @retval HAL_ERROR 参数指针或轴索引无效。
+ */
+HAL_StatusTypeDef GraspSkyBlock_GetTuning(uint8_t axis, float *kp, float *kd)
+{
+  if ((axis >= GRIPPER_MOTOR_COUNT) || (kp == NULL) || (kd == NULL))
+  {
+    return HAL_ERROR;
+  }
+
+  *kp = s_motor_group_kp[axis];
+  *kd = s_motor_group_kd[axis];
   return HAL_OK;
 }
 

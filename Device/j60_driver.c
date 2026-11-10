@@ -18,6 +18,9 @@
 #include "cmsis_os2.h"
 #include <string.h>
 
+/* 发送邮箱满时，在任务上下文中等待并重试的最长时间（单位：ms）。 */
+#define J60_TX_RETRY_TIMEOUT_MS   2U
+
 /* ========================== 内部变量 ========================== */
 
 /* J60 协议层保存所绑定的总线句柄，实际收发由 BSP_CAN 完成。 */
@@ -138,37 +141,54 @@ static uint8_t j60_node_valid(uint8_t node_id)
  * @param  payload 数据区指针；为 NULL 时使用全 0 数据。
  * @param  dlc     有效数据长度，最大为 8 字节。
  * @retval HAL_OK    报文已成功提交到 BSP CAN 发送路径。
- * @retval HAL_BUSY  发送邮箱暂时占满，可在下一周期重发。
+ * @retval HAL_BUSY  发送邮箱持续占满，重试超时。
  * @retval HAL_ERROR 参数无效或发送失败。
  */
 static HAL_StatusTypeDef j60_send(uint8_t command, uint8_t node_id,
                                   const uint8_t *payload, uint8_t dlc)
 {
     uint8_t zero_payload[8] = {0};
+    uint32_t start_ms = 0U;
     uint8_t result;
+    uint8_t retrying = 0U;
 
     /* 节点号非法或数据长度超限时拒绝发送。 */
     if (!j60_node_valid(node_id) || dlc > 8u) {
         return HAL_ERROR;
     }
 
-    result = BSP_CAN_SendStd(
-        s_hcan,
-        j60_can_id(command, node_id),
-        (payload != NULL) ? payload : zero_payload,
-        dlc);
+    for (;;) {
+        result = BSP_CAN_SendStd(
+            s_hcan,
+            j60_can_id(command, node_id),
+            (payload != NULL) ? payload : zero_payload,
+            dlc);
 
-    if (result == BSP_CAN_OK) {
-        ++j60_tx_count;
-        return HAL_OK;
+        if (result == BSP_CAN_OK) {
+            ++j60_tx_count;
+            return HAL_OK;
+        }
+
+        if (result != BSP_CAN_ERR_TX_FULL) {
+            return HAL_ERROR;
+        }
+
+        /*
+         * 经典 CAN 只有 3 个发送邮箱。初始化阶段会连续提交多帧，
+         * 邮箱短暂占满时等待硬件完成发送，而不是直接让初始化失败。
+         */
+        if (retrying == 0U) {
+            start_ms = HAL_GetTick();
+            retrying = 1U;
+        }
+
+        if ((uint32_t)(HAL_GetTick() - start_ms) >=
+            J60_TX_RETRY_TIMEOUT_MS) {
+            return HAL_BUSY;
+        }
+
+        osDelay(1U);
     }
-
-    /* 发送邮箱暂时占满属于瞬时拥塞，下一周期可再次提交。 */
-    if (result == BSP_CAN_ERR_TX_FULL) {
-        return HAL_BUSY;
-    }
-
-    return HAL_ERROR;
 }
 
 /* ========================== 初始化接口 ========================== */

@@ -99,6 +99,16 @@ HAL_StatusTypeDef GraspSkyBlock_SetKp(uint8_t axis, float kp);
 HAL_StatusTypeDef GraspSkyBlock_SetKd(uint8_t axis, float kd);
 
 /**
+ * @brief  获取指定电机轴当前运行时Kp/Kd。
+ * @param  axis 电机轴索引：0=大臂，1=传送轮。
+ * @param  kp   输出当前Kp。
+ * @param  kd   输出当前Kd。
+ * @retval HAL_OK    读取成功。
+ * @retval HAL_ERROR 参数指针或轴索引无效。
+ */
+HAL_StatusTypeDef GraspSkyBlock_GetTuning(uint8_t axis, float *kp, float *kd);
+
+/**
  * @brief  获取指定电机轴的目标位置和实际位置。
  * @param  axis        电机轴索引：0=大臂，1=传送轮。
  * @param  target_rad  输出目标位置，单位：rad。
