@@ -61,18 +61,18 @@ static const GraspMotorAxisConfig_t s_gripper_motor_config[] =
     .node_id = 8U,
     .min_rad = -1.625f,
     .max_rad = 0.270f,
-    .max_speed_rad_s = 0.50f,
+    .max_speed_rad_s = 0.80f,
     .direction = -1.0f,
-    .kp = 15.0f,
-    .kd = 0.8f
+    .kp = 50.0f,
+    .kd = 1.2f
   },
   {
     .node_id = 2U,
     .min_rad = -2.50f,
     .max_rad = -0.2925f,
-    .max_speed_rad_s = 1.50f,
+    .max_speed_rad_s = 2.00f,
     .direction = 1.0f,
-    .kp = 12.0f,
+    .kp = 50.0f,
     .kd = 0.8f
   }
 };

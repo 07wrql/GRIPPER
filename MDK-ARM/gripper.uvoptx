@@ -200,21 +200,6 @@
           <WinNumber>1</WinNumber>
           <ItemText>\Grasp_sky_block.c\s_motor_group_kd[1]</ItemText>
         </Ww>
-        <Ww>
-          <count>9</count>
-          <WinNumber>1</WinNumber>
-          <ItemText>*(unsigned long *)0xE000E108,0x0A</ItemText>
-        </Ww>
-        <Ww>
-          <count>10</count>
-          <WinNumber>1</WinNumber>
-          <ItemText>*(unsigned long *)0x4001140C,0x0A</ItemText>
-        </Ww>
-        <Ww>
-          <count>11</count>
-          <WinNumber>1</WinNumber>
-          <ItemText>*(unsigned long *)0x40011414,0x0A</ItemText>
-        </Ww>
       </WatchWindow1>
       <Tracepoint>
         <THDelay>0</THDelay>

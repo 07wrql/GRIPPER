@@ -8,8 +8,22 @@
 #define VOFA_CMD_SIZE            64U
 #define VOFA_SEND_PERIOD_MS      100U
 
-/* JustFloat遥测同时包含两个电机轴的位置和PD参数。 */
-#define VOFA_CHANNEL_COUNT        10U
+/*
+ * VOFA当前调试轴：
+ *   0U = 大臂电机（节点8，轴0）
+ *   1U = 摩擦轮电机（节点2，轴1）
+ *
+ * 切换电机时只修改此值并重新编译下载。两个电机仍正常参与控制，
+ * 此参数只决定VOFA命令修改哪个轴，以及回传哪个轴的数据。
+ */
+#define VOFA_TUNE_AXIS            1U
+
+#if (VOFA_TUNE_AXIS != 0U) && (VOFA_TUNE_AXIS != 1U)
+#error "VOFA_TUNE_AXIS must be 0 (arm) or 1 (friction wheel)"
+#endif
+
+/* JustFloat遥测只回传当前调试轴的Kp、Kd、实际位置和目标位置。 */
+#define VOFA_CHANNEL_COUNT        4U
 
 static UART_HandleTypeDef *s_vofa_huart = NULL;
 
@@ -27,8 +41,6 @@ static uint8_t s_tx_buf[(VOFA_CHANNEL_COUNT * sizeof(float)) + 4U];
 static volatile uint8_t s_tx_busy = 0U;
 
 static uint32_t s_last_send_ms = 0U;
-static uint32_t s_cmd_count = 0U;
-static float s_last_cmd_status = 0.0f;
 
 static void Vofa_ProcessRx(void);
 static void Vofa_ApplyCommand(char *cmd);
@@ -36,7 +48,8 @@ static void Vofa_SendTelemetry(const float *values, uint8_t count);
 
 /**
  * @brief 解析并执行一条命令。
- * @note 支持P8、D8、P2、D2，例如P8=15.0!。
+ * @note 支持P和D，例如P=50.0!、D=1.2!。
+ *       命令始终作用于VOFA_TUNE_AXIS选择的电机轴。
  */
 static void Vofa_ApplyCommand(char *cmd)
 {
@@ -47,7 +60,6 @@ static void Vofa_ApplyCommand(char *cmd)
   equal_sign = strchr(cmd, '=');
   if (equal_sign == NULL)
   {
-    s_last_cmd_status = -1.0f;
     return;
   }
 
@@ -56,34 +68,16 @@ static void Vofa_ApplyCommand(char *cmd)
   value = strtof(equal_sign + 1, &end_ptr);
   if ((end_ptr == (equal_sign + 1)) || (*end_ptr != '\0'))
   {
-    s_last_cmd_status = -1.0f;
     return;
   }
 
-  /* CH9状态：1=P8成功，2=D8成功，3=P2成功，4=D2成功，-1=失败。 */
-  if (strcmp(cmd, "P8") == 0)
+  if (strcmp(cmd, "P") == 0)
   {
-    s_last_cmd_status =
-        (GraspSkyBlock_SetKp(0U, value) == HAL_OK) ? 1.0f : -1.0f;
+    (void)GraspSkyBlock_SetKp(VOFA_TUNE_AXIS, value);
   }
-  else if (strcmp(cmd, "D8") == 0)
+  else if (strcmp(cmd, "D") == 0)
   {
-    s_last_cmd_status =
-        (GraspSkyBlock_SetKd(0U, value) == HAL_OK) ? 2.0f : -1.0f;
-  }
-  else if (strcmp(cmd, "P2") == 0)
-  {
-    s_last_cmd_status =
-        (GraspSkyBlock_SetKp(1U, value) == HAL_OK) ? 3.0f : -1.0f;
-  }
-  else if (strcmp(cmd, "D2") == 0)
-  {
-    s_last_cmd_status =
-        (GraspSkyBlock_SetKd(1U, value) == HAL_OK) ? 4.0f : -1.0f;
-  }
-  else
-  {
-    s_last_cmd_status = -1.0f;
+    (void)GraspSkyBlock_SetKd(VOFA_TUNE_AXIS, value);
   }
 }
 
@@ -116,7 +110,6 @@ static void Vofa_ProcessRx(void)
         s_cmd[s_cmd_len] = '\0';
         if (strchr(s_cmd, '=') != NULL)
         {
-          ++s_cmd_count;
           Vofa_ApplyCommand(s_cmd);
         }
       }
@@ -135,7 +128,7 @@ static void Vofa_ProcessRx(void)
     }
 
     /*
-     * 命令只可能是P8=、D8=、P2=或D2=。
+     * 命令只可能是P=或D=。
      * 如果当前字节不符合命令前缀，直接重新同步，避免把噪声拼进命令。
      */
     if (s_cmd_len == 0U)
@@ -146,15 +139,6 @@ static void Vofa_ProcessRx(void)
       }
     }
     else if (s_cmd_len == 1U)
-    {
-      if ((ch != '8') && (ch != '2'))
-      {
-        s_cmd_len = 0U;
-        s_cmd_overflow = 0U;
-        continue;
-      }
-    }
-    else if (s_cmd_len == 2U)
     {
       if (ch != '=')
       {
@@ -223,8 +207,6 @@ void Vofa_Init(UART_HandleTypeDef *huart)
   s_cmd_overflow = 0U;
 
   s_tx_busy = 0U;
-  s_cmd_count = 0U;
-  s_last_cmd_status = 0.0f;
 
   memset(s_rx_ring, 0, sizeof(s_rx_ring));
   memset(s_cmd, 0, sizeof(s_cmd));
@@ -249,37 +231,23 @@ void Vofa_Task1ms(void)
   now = HAL_GetTick();
   if ((uint32_t)(now - s_last_send_ms) >= VOFA_SEND_PERIOD_MS)
   {
-    float target0_rad;
-    float actual0_rad;
-    float target1_rad;
-    float actual1_rad;
-    float kp0;
-    float kd0;
-    float kp1;
-    float kd1;
+    float kp;
+    float kd;
+    float target_rad;
+    float actual_rad;
     float values[VOFA_CHANNEL_COUNT];
 
     s_last_send_ms = now;
 
-    if ((GraspSkyBlock_GetTelemetry(0U,
-                                    &target0_rad,
-                                    &actual0_rad) == HAL_OK) &&
-        (GraspSkyBlock_GetTelemetry(1U,
-                                    &target1_rad,
-                                    &actual1_rad) == HAL_OK) &&
-        (GraspSkyBlock_GetTuning(0U, &kp0, &kd0) == HAL_OK) &&
-        (GraspSkyBlock_GetTuning(1U, &kp1, &kd1) == HAL_OK))
+    if ((GraspSkyBlock_GetTuning(VOFA_TUNE_AXIS, &kp, &kd) == HAL_OK) &&
+        (GraspSkyBlock_GetTelemetry(VOFA_TUNE_AXIS,
+                                    &target_rad,
+                                    &actual_rad) == HAL_OK))
     {
-      values[0] = target0_rad;        /* CH0：轴0目标位置(rad) */
-      values[1] = actual0_rad;        /* CH1：轴0实际位置(rad) */
-      values[2] = target1_rad;        /* CH2：轴1目标位置(rad) */
-      values[3] = actual1_rad;        /* CH3：轴1实际位置(rad) */
-      values[4] = kp0;                /* CH4：轴0当前Kp */
-      values[5] = kd0;                /* CH5：轴0当前Kd */
-      values[6] = kp1;                /* CH6：轴1当前Kp */
-      values[7] = kd1;                /* CH7：轴1当前Kd */
-      values[8] = (float)s_cmd_count; /* CH8：完整命令计数 */
-      values[9] = s_last_cmd_status;  /* CH9：最近命令结果 */
+      values[0] = kp;          /* CH0：当前调试轴Kp */
+      values[1] = kd;          /* CH1：当前调试轴Kd */
+      values[2] = actual_rad;  /* CH2：当前调试轴实际位置(rad) */
+      values[3] = target_rad;  /* CH3：当前调试轴目标位置(rad) */
       Vofa_SendTelemetry(values, VOFA_CHANNEL_COUNT);
     }
   }
