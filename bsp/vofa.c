@@ -1,5 +1,4 @@
 #include "vofa.h"
-#include "Grasp_sky_block.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -7,25 +6,10 @@
 #define VOFA_RX_RING_SIZE       128U
 #define VOFA_CMD_SIZE            64U
 #define VOFA_SEND_PERIOD_MS      100U
-
-/*
- * VOFA当前调试轴：
- *   0U = 大臂电机（节点8，轴0）
- *   1U = 摩擦轮电机（节点2，轴1）
- *
- * 切换电机时只修改此值并重新编译下载。两个电机仍正常参与控制，
- * 此参数只决定VOFA命令修改哪个轴，以及回传哪个轴的数据。
- */
-#define VOFA_TUNE_AXIS            1U
-
-#if (VOFA_TUNE_AXIS != 0U) && (VOFA_TUNE_AXIS != 1U)
-#error "VOFA_TUNE_AXIS must be 0 (arm) or 1 (friction wheel)"
-#endif
-
-/* JustFloat遥测只回传当前调试轴的Kp、Kd、实际位置和目标位置。 */
-#define VOFA_CHANNEL_COUNT        4U
+#define VOFA_MAX_CHANNELS         8U
 
 static UART_HandleTypeDef *s_vofa_huart = NULL;
+static VofaPort_t s_vofa_port;
 
 static uint8_t s_rx_byte;
 
@@ -37,7 +21,7 @@ static char s_cmd[VOFA_CMD_SIZE];
 static uint16_t s_cmd_len = 0U;
 static uint8_t s_cmd_overflow = 0U;
 
-static uint8_t s_tx_buf[(VOFA_CHANNEL_COUNT * sizeof(float)) + 4U];
+static uint8_t s_tx_buf[(VOFA_MAX_CHANNELS * sizeof(float)) + 4U];
 static volatile uint8_t s_tx_busy = 0U;
 
 static uint32_t s_last_send_ms = 0U;
@@ -47,9 +31,8 @@ static void Vofa_ApplyCommand(char *cmd);
 static void Vofa_SendTelemetry(const float *values, uint8_t count);
 
 /**
- * @brief 解析并执行一条命令。
- * @note 支持P和D，例如P=50.0!、D=1.2!。
- *       命令始终作用于VOFA_TUNE_AXIS选择的电机轴。
+ * @brief  解析并转发一条命令。
+ * @note   支持P和D，例如P=50.0!、D=1.2!。
  */
 static void Vofa_ApplyCommand(char *cmd)
 {
@@ -71,18 +54,14 @@ static void Vofa_ApplyCommand(char *cmd)
     return;
   }
 
-  if (strcmp(cmd, "P") == 0)
+  if (s_vofa_port.on_command != NULL)
   {
-    (void)GraspSkyBlock_SetKp(VOFA_TUNE_AXIS, value);
-  }
-  else if (strcmp(cmd, "D") == 0)
-  {
-    (void)GraspSkyBlock_SetKd(VOFA_TUNE_AXIS, value);
+    s_vofa_port.on_command(cmd[0], value);
   }
 }
 
 /**
- * @brief 从环形缓冲区取出并解析命令。
+ * @brief  从环形缓冲区取出并解析命令。
  */
 static void Vofa_ProcessRx(void)
 {
@@ -127,10 +106,7 @@ static void Vofa_ProcessRx(void)
       continue;
     }
 
-    /*
-     * 命令只可能是P=或D=。
-     * 如果当前字节不符合命令前缀，直接重新同步，避免把噪声拼进命令。
-     */
+    /* 当前只接受P=或D=命令，其他前缀直接丢弃并重新同步。 */
     if (s_cmd_len == 0U)
     {
       if ((ch != 'P') && (ch != 'D'))
@@ -161,9 +137,9 @@ static void Vofa_ProcessRx(void)
 }
 
 /**
- * @brief 发送一帧JustFloat遥测数据。
- * @param values 浮点通道数组。
- * @param count  通道数量，最多VOFA_CHANNEL_COUNT。
+ * @brief  发送一帧JustFloat遥测数据。
+ * @param  values 浮点通道数组。
+ * @param  count  通道数量，最多VOFA_MAX_CHANNELS。
  */
 static void Vofa_SendTelemetry(const float *values, uint8_t count)
 {
@@ -171,7 +147,7 @@ static void Vofa_SendTelemetry(const float *values, uint8_t count)
   uint8_t payload_size;
 
   if ((s_vofa_huart == NULL) || (values == NULL) ||
-      (count == 0U) || (count > VOFA_CHANNEL_COUNT) ||
+      (count == 0U) || (count > VOFA_MAX_CHANNELS) ||
       (s_tx_busy != 0U))
   {
     return;
@@ -191,7 +167,7 @@ static void Vofa_SendTelemetry(const float *values, uint8_t count)
   }
 }
 
-void Vofa_Init(UART_HandleTypeDef *huart)
+void Vofa_Init(UART_HandleTypeDef *huart, const VofaPort_t *port)
 {
   if (huart == NULL)
   {
@@ -199,6 +175,15 @@ void Vofa_Init(UART_HandleTypeDef *huart)
   }
 
   s_vofa_huart = huart;
+
+  if (port == NULL)
+  {
+    memset(&s_vofa_port, 0, sizeof(s_vofa_port));
+  }
+  else
+  {
+    memcpy(&s_vofa_port, port, sizeof(s_vofa_port));
+  }
 
   s_rx_head = 0U;
   s_rx_tail = 0U;
@@ -231,24 +216,20 @@ void Vofa_Task1ms(void)
   now = HAL_GetTick();
   if ((uint32_t)(now - s_last_send_ms) >= VOFA_SEND_PERIOD_MS)
   {
-    float kp;
-    float kd;
-    float target_rad;
-    float actual_rad;
-    float values[VOFA_CHANNEL_COUNT];
+    float values[VOFA_MAX_CHANNELS];
+    uint8_t count = 0U;
 
     s_last_send_ms = now;
 
-    if ((GraspSkyBlock_GetTuning(VOFA_TUNE_AXIS, &kp, &kd) == HAL_OK) &&
-        (GraspSkyBlock_GetTelemetry(VOFA_TUNE_AXIS,
-                                    &target_rad,
-                                    &actual_rad) == HAL_OK))
+    if (s_vofa_port.fill_telemetry != NULL)
     {
-      values[0] = kp;          /* CH0：当前调试轴Kp */
-      values[1] = kd;          /* CH1：当前调试轴Kd */
-      values[2] = actual_rad;  /* CH2：当前调试轴实际位置(rad) */
-      values[3] = target_rad;  /* CH3：当前调试轴目标位置(rad) */
-      Vofa_SendTelemetry(values, VOFA_CHANNEL_COUNT);
+      count = s_vofa_port.fill_telemetry(values, VOFA_MAX_CHANNELS);
+      if (count > VOFA_MAX_CHANNELS)
+      {
+        count = VOFA_MAX_CHANNELS;
+      }
+
+      Vofa_SendTelemetry(values, count);
     }
   }
 }

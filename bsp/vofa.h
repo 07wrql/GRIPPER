@@ -4,21 +4,38 @@
 #include "stm32f4xx_hal.h"
 
 /**
- * @brief 初始化VOFA并启动USART接收。
- * @param huart VOFA使用的串口，通常为&huart6。
+ * @brief  VOFA业务回调。
+ * @note   本模块只负责VOFA协议和串口收发，不依赖任何具体控制模块。
  */
-void Vofa_Init(UART_HandleTypeDef *huart);
+typedef struct
+{
+  /**
+   * @brief  收到P=...!或D=...!命令后调用。
+   * @param  parameter 命令参数，当前为'P'或'D'。
+   * @param  value     解析后的浮点数值。
+   */
+  void (*on_command)(char parameter, float value);
+
+  /**
+   * @brief  填充一帧JustFloat遥测通道。
+   * @param  values   输出通道数据。
+   * @param  capacity values数组允许写入的最大通道数。
+   * @return 实际填充的通道数；返回0表示本次不发送遥测。
+   */
+  uint8_t (*fill_telemetry)(float *values, uint8_t capacity);
+} VofaPort_t;
 
 /**
- * @brief VOFA周期任务。
- * @note 在GripperTask中每1ms调用一次，每100ms发送一帧4通道JustFloat：
- *       CH0=当前调试轴Kp，CH1=当前调试轴Kd，
- *       CH2=当前调试轴实际位置(rad)，CH3=当前调试轴目标位置(rad)。
- *       命令格式：P=50.0!、D=1.2!。
- *       调试轴由vofa.c中的VOFA_TUNE_AXIS选择：
- *       0U=大臂电机，1U=摩擦轮电机。
+ * @brief  初始化VOFA并启动串口接收。
+ * @param  huart VOFA使用的串口。
+ * @param  port  业务回调；传入NULL时模块保持静默。
+ */
+void Vofa_Init(UART_HandleTypeDef *huart, const VofaPort_t *port);
+
+/**
+ * @brief  VOFA周期任务，建议每1ms调用一次。
+ * @note   命令解析每1ms进行，遥测按100ms周期发送。
  */
 void Vofa_Task1ms(void);
-
 
 #endif /* BSP_VOFA_H */

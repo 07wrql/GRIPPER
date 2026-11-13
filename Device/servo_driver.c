@@ -58,8 +58,3 @@ void Servo_SetAngle(int32_t angle_deg)
 
     Servo_SetPulseUs(pulse_us);
 }
-
-HAL_StatusTypeDef Servo_Stop(void)
-{
-    return HAL_TIM_PWM_Stop(SERVO_TIM_HANDLE, SERVO_TIM_CHANNEL);
-}

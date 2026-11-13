@@ -28,26 +28,3 @@ void Relay_Set(uint8_t enabled)
                       (enabled != 0U) ? RELAY_ACTIVE_LEVEL
                                      : RELAY_INACTIVE_LEVEL);
 }
-
-void Relay_On(void)
-{
-    Relay_Set(1U);
-}
-
-void Relay_Off(void)
-{
-    Relay_Set(0U);
-}
-
-void Relay_Toggle(void)
-{
-    Relay_Set((uint8_t)!Relay_GetState());
-}
-
-uint8_t Relay_GetState(void)
-{
-    return (HAL_GPIO_ReadPin(RELAY_IN_GPIO_PORT, RELAY_IN_GPIO_PIN) ==
-            RELAY_ACTIVE_LEVEL)
-               ? 1U
-               : 0U;
-}

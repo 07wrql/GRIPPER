@@ -47,10 +47,6 @@ void Servo_SetPulseUs(uint32_t pulse_us);
   */
 void Servo_SetAngle(int32_t angle_deg);
 
-/**
-  * @brief  停止 TIM2_CH2 的 PWM 输出。
-  */
-HAL_StatusTypeDef Servo_Stop(void);
 
 
 #endif /* SERVO_DRIVER_H */

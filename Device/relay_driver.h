@@ -32,25 +32,6 @@ void Relay_Init(void);
   */
 void Relay_Set(uint8_t enabled);
 
-/**
-  * @brief  使继电器吸合。
-  */
-void Relay_On(void);
-
-/**
-  * @brief  使继电器断开。
-  */
-void Relay_Off(void);
-
-/**
-  * @brief  切换继电器状态。
-  */
-void Relay_Toggle(void);
-
-/**
-  * @brief  获取继电器当前逻辑状态。
-  */
-uint8_t Relay_GetState(void);
 
 
 #endif /* RELAY_DRIVER_H */

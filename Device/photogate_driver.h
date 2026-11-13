@@ -32,10 +32,6 @@
 #ifndef PHOTOGATE_DRIVER_H
 #define PHOTOGATE_DRIVER_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include "stm32f4xx_hal.h"
 
 #define PHOTO_GATE_IN_GPIO_PORT    GPIOF
@@ -52,8 +48,5 @@ extern "C" {
   */
 GPIO_PinState PhotoGate_ReadRawLevel(void);
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* PHOTOGATE_DRIVER_H */
