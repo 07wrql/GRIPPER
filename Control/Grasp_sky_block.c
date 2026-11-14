@@ -2,22 +2,7 @@
  * @file    Grasp_sky_block.c
  * @brief   夹爪自动流程控制实现。
  * @details
- *
- *   当前工程只运行自动流程：
- *   1. 上电张开夹爪、舵机回零并建立90度联动基准；
- *   2. 等待auto_start_flag；
- *   3. 大臂向下扫描，光电门持续检测；
- *   4. 检测到物块后立即夹紧，记录抓取位置并原地稳定；
- *   5. 先向起点方向抬升使物块离地，再在回程中翻转舵机；
- *   6. 回到起点后等待auto_release_flag；
- *   7. 重新下降到记录的抓取位置，张开夹爪放料；
- *   8. 第二次回程保持舵机翻转角，回到起点稳定后再让舵机回中。
- *
- *   2号J60通过传送带驱动顶部夹爪组件。运行时2号目标角由大臂目标角
- *   按标定后的线性关系实时计算，使顶部夹爪组件相对大臂保持90度。
- *
- *   自动流程中的等待均以约1 ms周期调用电机组控制，避免J60控制中断。
- */
+*/
 
 #include "Grasp_sky_block.h"
 #include "j60_driver.h"
@@ -31,6 +16,16 @@
 /* 大臂扫描和回位速度，单位：rad/s。 */
 #define AUTO_SCAN_SPEED_RAD_S              0.50f
 #define AUTO_RETURN_SPEED_RAD_S            0.50f
+
+
+/* 夹住物块后，先抬离地面再开始翻转。该角度需按实机间隙标定。 */
+#define AUTO_GROUND_CLEARANCE_RAD          0.15f
+/* 第二次从起点下降到保存抓取位置的速度。 */
+#define AUTO_PLACE_SPEED_RAD_S             0.50f
+
+/* 大臂返回到起点的判定误差，单位：rad。 */
+#define AUTO_RETURN_TOLERANCE_RAD          0.005f
+
 
 /* 上电机械限位处的大臂反馈角度，单位：rad。实测有偏差时修改此值。 */
 #define AUTO_ARM_HOME_RAD                  0.250f
@@ -46,24 +41,15 @@
 #define AUTO_BELT_FOLLOW_SLOPE             (-0.86f)
 
 /* 上电低速对位参数。 */
-#define AUTO_ALIGN_SPEED_RAD_S             0.80f
-#define AUTO_ALIGN_POSITION_TOL_RAD        0.030f
-#define AUTO_ALIGN_TIMEOUT_MS              5000U
+#define AUTO_ALIGN_SPEED_RAD_S             1.0f        //对准速度
+#define AUTO_ALIGN_POSITION_TOL_RAD        0.030f      //对准误差
+#define AUTO_ALIGN_TIMEOUT_MS              3000U
 
 /* 各执行动作的等待时间，单位：ms。 */
-#define AUTO_CLAMP_WAIT_MS                 400U  /* 气泵夹紧后等待夹爪闭合到位 */
 #define AUTO_DROP_WAIT_MS                  400U  /* 夹爪张开后等待物块落下 */
 #define AUTO_SERVO_SETTLE_MS               700U  /* 舵机翻转或回零后等待到位 */
-#define AUTO_RETURN_SETTLE_MS              200U  /* 大臂移动到目标后等待稳定 */
 #define AUTO_PLACE_SETTLE_MS               200U  /* 第二次下降到抓取位置后等待稳定 */
 
-/* 夹住物块后，先抬离地面再开始翻转。该角度需按实机间隙标定。 */
-#define AUTO_GROUND_CLEARANCE_RAD          0.15f
-/* 第二次从起点下降到保存抓取位置的速度。 */
-#define AUTO_PLACE_SPEED_RAD_S             0.50f
-
-/* 大臂返回到起点的判定误差，单位：rad。 */
-#define AUTO_RETURN_TOLERANCE_RAD          0.005f
 
 /* ======================== 电机组配置定义 ======================== */
 
@@ -385,17 +371,6 @@ static void GraspSkyBlock_MotorGroupInit(
 }
 
 /**
- * @brief  根据大臂目标角计算2号电机目标角。
- * @param  arm_target_rad 大臂目标角，单位：rad。
- * @return 2号电机目标角，单位：rad。
- */
-static float GraspSkyBlock_BeltTargetFromArm(float arm_target_rad)
-{
-  return AUTO_BELT_HOME_RAD +
-         AUTO_BELT_FOLLOW_SLOPE * (arm_target_rad - AUTO_ARM_HOME_RAD);
-}
-
-/**
  * @brief  将2号电机目标角强制约束到标定后的90度联动关系。
  * @return 1：目标在2号允许范围内；0：联动目标超限。
  */
@@ -404,7 +379,9 @@ static uint8_t GraspSkyBlock_ApplyBeltPositionCoupling(void)
   const GraspMotorAxisConfig_t *belt_axis =
       &s_motor_group_config.motors[1];
   float belt_target_rad =
-      GraspSkyBlock_BeltTargetFromArm(s_motor_group_target_rad[0]);
+      AUTO_BELT_HOME_RAD +
+      AUTO_BELT_FOLLOW_SLOPE *
+          (s_motor_group_target_rad[0] - AUTO_ARM_HOME_RAD);
 
   if ((belt_target_rad < belt_axis->min_rad) ||
       (belt_target_rad > belt_axis->max_rad))
@@ -692,12 +669,7 @@ static uint8_t GraspSkyBlock_AutoDelayMs(uint32_t delay_ms)
 }
 
 /**
- * @brief  以给定速度将大臂移动到指定目标角。
- * @param  target_rad   大臂目标角，单位：rad。
- * @param  speed_rad_s  移动速度绝对值，单位：rad/s。
- * @param  settle_ms    到达目标后的稳定等待时间，单位：ms。
- * @return 1：到达完成；0：参数无效或电机组失效。
- * @note   移动过程中持续调用 AutoService，因此2号始终按90度关系联动。
+ * @brief  以给定速度将大臂平滑移动到指定目标角，并在到位后保持。
  */
 static uint8_t GraspSkyBlock_AutoMoveArmTo(float target_rad,
                                            float speed_rad_s,
@@ -707,6 +679,7 @@ static uint8_t GraspSkyBlock_AutoMoveArmTo(float target_rad,
   float current_rad;
   float error_rad;
 
+  /* 速度必须是正数，目标角必须位于大臂软件限位内。 */
   if ((speed_rad_s <= 0.0f) ||
       (target_rad < arm_axis->min_rad) ||
       (target_rad > arm_axis->max_rad))
@@ -714,11 +687,16 @@ static uint8_t GraspSkyBlock_AutoMoveArmTo(float target_rad,
     return 0U;
   }
 
+  /*
+   * 每一周期重新读取软件目标角，并判断是否已进入允许误差范围。
+   * AutoService负责推进目标角、发送控制帧并维持2号电机联动。
+   */
   while (s_motor_group_ready != 0U)
   {
     current_rad = s_motor_group_target_rad[0];
     error_rad = target_rad - current_rad;
 
+    /* 统一转换为绝对误差，只用于判断距离目标还有多远。 */
     if (error_rad < 0.0f)
     {
       error_rad = -error_rad;
@@ -728,6 +706,7 @@ static uint8_t GraspSkyBlock_AutoMoveArmTo(float target_rad,
       break;
     }
 
+    /* speed_rad_s只表示速度大小，正负方向由目标位置决定。 */
     if (target_rad > current_rad)
     {
       GraspSkyBlock_AutoService(speed_rad_s);
@@ -739,14 +718,17 @@ static uint8_t GraspSkyBlock_AutoMoveArmTo(float target_rad,
     osDelay(1U);
   }
 
+  /* 移动途中电机组失效时，不能把本次移动报告为成功。 */
   if (s_motor_group_ready == 0U)
   {
     return 0U;
   }
 
+  /* 消除容差内的小偏差，并发送零速度位置保持指令。 */
   s_motor_group_target_rad[0] = target_rad;
   GraspSkyBlock_AutoService(0.0f);
 
+  /* 不需要稳定等待时直接返回。 */
   if (settle_ms == 0U)
   {
     return 1U;
@@ -843,12 +825,12 @@ static uint8_t GraspSkyBlock_AutoReturnHome(void)
 {
   return GraspSkyBlock_AutoMoveArmTo(AUTO_ARM_HOME_RAD,
                                      AUTO_RETURN_SPEED_RAD_S,
-                                     AUTO_RETURN_SETTLE_MS);
+                                     0U);
 }
 
 /**
- * @brief  检测到物块后立即夹紧，并记录稳定后的抓取位置。
- * @return 1：夹紧完成；0：等待期间电机组失效。
+ * @brief  检测到物块后立即夹紧，并记录当前抓取位置。
+ * @return 1：夹紧命令已发出。
  * @note   此处不翻转舵机。必须先回程抬离地面，避免物块与地面摩擦。
  */
 static uint8_t GraspSkyBlock_AutoClampAndHold(void)
@@ -858,12 +840,7 @@ static uint8_t GraspSkyBlock_AutoClampAndHold(void)
 
   GraspSkyBlock_SetPumpOn(0U);
 
-  if (GraspSkyBlock_AutoDelayMs(AUTO_CLAMP_WAIT_MS) == 0U)
-  {
-    return 0U;
-  }
-
-  /* 夹紧稳定后记录大臂实际位置，作为第二次下降的目标。 */
+  /* 记录当前大臂实际位置，作为第二次下降的目标。 */
   if (J60_GetMotorSnapshot(arm_axis->node_id, &arm_data) == HAL_OK)
   {
     s_grasp_arm_target_rad = arm_data.position_rad;
@@ -898,7 +875,7 @@ static uint8_t GraspSkyBlock_AutoLiftAndFlipReturn(void)
   /* 舵机保持HOME角，先抬升到物块离开地面的位置。 */
   if (GraspSkyBlock_AutoMoveArmTo(clearance_target_rad,
                                   AUTO_RETURN_SPEED_RAD_S,
-                                  AUTO_RETURN_SETTLE_MS) == 0U)
+                                  0U) == 0U)
   {
     return 0U;
   }
@@ -987,28 +964,25 @@ static uint8_t GraspSkyBlock_AutoPlaceAndReturn(void)
 }
 
 /**
- * @brief  上电低速建立大臂与顶部夹爪组件的90度基准姿态。
- * @return 1：对位完成；0：电机异常或超时。
- * @note   对位期间关闭位置联动，保持当前实际大臂角，并让2号缓慢移动
- *         到该大臂角对应的90度目标；到位后再启用运行时位置约束。
+ * @brief  建立大臂与2号传送带电机的90度联动基准。
+ * @return 1：对位完成且联动已启用；0：电机异常或对位超时。
+ * @note   该函数不强制大臂回到0.250 rad机械基准，而是保持上电时的实际
+ *         大臂角，按标定关系计算2号目标角，再缓慢推进到该位置。
  */
-static uint8_t GraspSkyBlock_MotorGroupAlignToHome(void)
+static uint8_t GraspSkyBlock_MotorGroupAlignBeltToArm(void)
 {
   const GraspMotorAxisConfig_t *arm_axis =
-      &s_gripper_motor_config[0];
+      &s_motor_group_config.motors[0];
   const GraspMotorAxisConfig_t *belt_axis =
-      &s_gripper_motor_config[1];
+      &s_motor_group_config.motors[1];
   J60_MotorData arm_data;
   J60_MotorData belt_data;
-  float belt_step_rad =
-      AUTO_ALIGN_SPEED_RAD_S * s_motor_group_config.control_dt_s;
-  float arm_target_rad;
   float belt_target_rad;
+  float belt_step_rad;
   float belt_delta_rad;
   float belt_error_rad;
   uint32_t start_ms;
-  uint8_t target_reached = 0U;
-  uint8_t aligned = 0U;
+  uint8_t ramp_target_reached = 0U;
 
   if ((s_motor_group_initialized == 0U) ||
       (s_motor_group_ready == 0U))
@@ -1016,22 +990,23 @@ static uint8_t GraspSkyBlock_MotorGroupAlignToHome(void)
     return 0U;
   }
 
+  /* 对位期间由本函数手动推进2号目标，禁止控制核心提前覆盖。 */
   s_motor_group_belt_coupling_enabled = 0U;
 
+  /*
+   * 上电机械限位可能落在0.250 rad附近而不是绝对等于0.250 rad。
+   * 因此保持当前实际大臂角，避免强行拉回基准导致对位超时。
+   */
   if (J60_GetMotorSnapshot(arm_axis->node_id, &arm_data) != HAL_OK)
   {
     GraspSkyBlock_MotorGroupFailSafe();
     return 0U;
   }
 
-  /*
-   * 上电机械限位可能落在 0.250 rad 附近而不是绝对等于 0.250 rad。
-   * 因此保持当前实际大臂角，并按联动关系计算该角度对应的2号目标，
-   * 避免强行把大臂拉到0.250导致对位超时。
-   */
-  arm_target_rad = arm_data.position_rad;
-  belt_target_rad = GraspSkyBlock_BeltTargetFromArm(arm_target_rad);
-  s_motor_group_target_rad[0] = arm_target_rad;
+  s_motor_group_target_rad[0] = arm_data.position_rad;
+
+  /* 传送带目标角度:-0.729+-0.86（大臂当前角度-0.25），大臂转动的角度，小臂要转0.86×这个角度 */
+  belt_target_rad = AUTO_BELT_HOME_RAD +AUTO_BELT_FOLLOW_SLOPE *(arm_data.position_rad - AUTO_ARM_HOME_RAD);
 
   if ((belt_target_rad < belt_axis->min_rad) ||
       (belt_target_rad > belt_axis->max_rad))
@@ -1039,16 +1014,16 @@ static uint8_t GraspSkyBlock_MotorGroupAlignToHome(void)
     GraspSkyBlock_MotorGroupFailSafe();
     return 0U;
   }
-
+  /*每一个周期移动的角度=速度×时间，调整对应的参数可以调整上电之后夹爪组件到90°的速度*/
+  belt_step_rad = AUTO_ALIGN_SPEED_RAD_S * s_motor_group_config.control_dt_s;
   start_ms = HAL_GetTick();
+
   while (s_motor_group_ready != 0U)
   {
-    if ((uint32_t)(HAL_GetTick() - start_ms) >= AUTO_ALIGN_TIMEOUT_MS)
-    {
-      break;
-    }
+    /* 第一段：平滑推进2号目标角，最终精确落在目标值。 */
+    belt_delta_rad =
+        belt_target_rad - s_motor_group_target_rad[1];
 
-    belt_delta_rad = belt_target_rad - s_motor_group_target_rad[1];
     if (belt_delta_rad > belt_step_rad)
     {
       s_motor_group_target_rad[1] += belt_step_rad;
@@ -1060,12 +1035,22 @@ static uint8_t GraspSkyBlock_MotorGroupAlignToHome(void)
     else
     {
       s_motor_group_target_rad[1] = belt_target_rad;
-      target_reached = 1U;
+      ramp_target_reached = 1U;
     }
 
     GraspSkyBlock_MotorGroupRun(NULL);
 
-    if ((target_reached != 0U) &&
+    /* 控制调用可能触发失效保护，失败后不再继续判断对准。 */
+    if (s_motor_group_ready == 0U)
+    {
+      break;
+    }
+
+    /*
+     * 第二段：软件目标到达后，再读取2号实际反馈。
+     * 只有实际误差进入容差，才认为机械姿态真正对准。
+     */
+    if ((ramp_target_reached != 0U) &&
         (J60_GetMotorSnapshot(belt_axis->node_id, &belt_data) == HAL_OK))
     {
       belt_error_rad = belt_data.position_rad - belt_target_rad;
@@ -1076,26 +1061,29 @@ static uint8_t GraspSkyBlock_MotorGroupAlignToHome(void)
 
       if (belt_error_rad <= AUTO_ALIGN_POSITION_TOL_RAD)
       {
-        aligned = 1U;
-        break;
+        /* 第三段：锁定精确基准，并正式启用运行时90度联动。 */
+        s_motor_group_target_rad[0] = arm_data.position_rad;
+        s_motor_group_target_rad[1] = belt_target_rad;
+        s_motor_group_belt_coupling_enabled = 1U;
+
+        GraspSkyBlock_MotorGroupRun(NULL);
+        return (s_motor_group_ready != 0U) ? 1U : 0U;
       }
+    }
+
+    /* 第四段：超时保护。差值写法支持HAL_GetTick()计数器回绕。 */
+    if ((uint32_t)(HAL_GetTick() - start_ms) >=
+        AUTO_ALIGN_TIMEOUT_MS)
+    {
+      break;
     }
 
     osDelay(1U);
   }
 
-  if (aligned == 0U)
-  {
-    GraspSkyBlock_MotorGroupFailSafe();
-    return 0U;
-  }
-
-  s_motor_group_target_rad[0] = arm_target_rad;
-  s_motor_group_target_rad[1] = belt_target_rad;
-  s_motor_group_belt_coupling_enabled = 1U;
-  GraspSkyBlock_MotorGroupRun(NULL);
-
-  return (s_motor_group_ready != 0U) ? 1U : 0U;
+  /* 超时或控制失效统一关断输出并清除联动标志。 */
+  GraspSkyBlock_MotorGroupFailSafe();
+  return 0U;
 }
 
 /* ======================== 对外接口 ======================== */
@@ -1133,7 +1121,7 @@ HAL_StatusTypeDef GraspSkyBlock_MotorInit(CAN_HandleTypeDef *hcan)
     return HAL_ERROR;
   }
 
-  return (GraspSkyBlock_MotorGroupAlignToHome() != 0U)
+  return (GraspSkyBlock_MotorGroupAlignBeltToArm() != 0U)
              ? HAL_OK
              : HAL_ERROR;
 }
@@ -1152,7 +1140,7 @@ void GraspSkyBlock_AutoRun(void)
     return;
   }
 
-  /* 一次性启动请求，待机时只服务电机；第一个标志到来后才进入本轮流程。 */
+  /* 在没有给信号的时候，电机保持在原位置 */
   if (g_grasp_sky_block_runtime.auto_start_flag == 0U)
   {
     GraspSkyBlock_AutoService(0.0f);
